@@ -6,6 +6,7 @@ import { useAuth } from "@/components/auth-provider"
 import { useDirectory } from "@/components/directory-provider"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { isAdminLikeRole } from "@/lib/auth"
@@ -30,7 +31,10 @@ interface Message {
     id: string
     senderId: string
     content: string
-    type: "text" | "image"
+    type: "text" | "image" | "file"
+    fileName?: string
+    mimeType?: string
+    fileSize?: number
     timestamp: string
     status: "sent" | "delivered" | "read"
 }
@@ -64,6 +68,25 @@ function getUnreadCount(messages: Message[], currentUserId: string) {
     return messages.filter((message) => message.senderId !== currentUserId && message.status !== "read").length
 }
 
+const EMOJI_OPTIONS = ["👍", "❤️", "🔥", "👏", "😊", "😂", "🎉", "📌", "✅", "🚀", "📎", "🦊"]
+const MAX_CHAT_UPLOAD_SIZE_BYTES = 2 * 1024 * 1024
+
+function formatFileSize(size?: number) {
+    if (!size) {
+        return ""
+    }
+
+    if (size < 1024) {
+        return `${size} B`
+    }
+
+    if (size < 1024 * 1024) {
+        return `${(size / 1024).toFixed(1)} KB`
+    }
+
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`
+}
+
 export default function ChatsPage() {
     const { user } = useAuth()
     const { people, teams } = useDirectory()
@@ -82,6 +105,7 @@ export default function ChatsPage() {
     const [selectedChatId, setSelectedChatId] = useState<string>("")
     const [searchQuery, setSearchQuery] = useState("")
     const [newMessage, setNewMessage] = useState("")
+    const [isEmojiPickerOpen, setIsEmojiPickerOpen] = useState(false)
     const [isSelectingChatId, setIsSelectingChatId] = useState<string | null>(null)
     const [isSendingMessage, setIsSendingMessage] = useState(false)
     const [deletingMessageId, setDeletingMessageId] = useState<string | null>(null)
@@ -308,28 +332,97 @@ export default function ChatsPage() {
         }
     }
 
-    const handleSendMessage = async () => {
-        if (!newMessage.trim() || !selectedThread || isSendingMessage) {
+    const handleSendMessage = async (
+        overrides?: {
+            content: string
+            type?: "text" | "image" | "file"
+            fileName?: string
+            mimeType?: string
+            fileSize?: number
+        },
+    ) => {
+        const payload = {
+            content: overrides?.content ?? newMessage.trim(),
+            type: overrides?.type ?? "text",
+            fileName: overrides?.fileName,
+            mimeType: overrides?.mimeType,
+            fileSize: overrides?.fileSize,
+        }
+
+        if (!payload.content || !selectedThread || isSendingMessage) {
             return
         }
 
         setIsSendingMessage(true)
         try {
-            await fetch("/api/chats", {
+            const response = await fetch("/api/chats", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 credentials: "include",
                 body: JSON.stringify({
                     threadId: selectedThread.id,
-                    content: newMessage.trim(),
+                    content: payload.content,
+                    type: payload.type,
+                    fileName: payload.fileName,
+                    mimeType: payload.mimeType,
+                    fileSize: payload.fileSize,
                 }),
             })
 
+            if (!response.ok) {
+                return
+            }
+
             await loadChats()
-            setNewMessage("")
+            if (!overrides) {
+                setNewMessage("")
+            }
         } finally {
             setIsSendingMessage(false)
         }
+    }
+
+    const convertFileToDataUrl = (file: File) =>
+        new Promise<string>((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "")
+            reader.onerror = () => reject(new Error("Không thể đọc tệp đã chọn."))
+            reader.readAsDataURL(file)
+        })
+
+    const handleUploadAsset = async (event: React.ChangeEvent<HTMLInputElement>, mode: "image" | "file") => {
+        const file = event.target.files?.[0]
+        event.target.value = ""
+
+        if (!file || !selectedThread || isSendingMessage) {
+            return
+        }
+
+        if (mode === "image" && !file.type.startsWith("image/")) {
+            return
+        }
+
+        if (file.size > MAX_CHAT_UPLOAD_SIZE_BYTES) {
+            return
+        }
+
+        try {
+            const content = await convertFileToDataUrl(file)
+            await handleSendMessage({
+                content,
+                type: mode,
+                fileName: file.name,
+                mimeType: file.type,
+                fileSize: file.size,
+            })
+        } catch {
+            // Ignore file read failures for now.
+        }
+    }
+
+    const handleInsertEmoji = (emoji: string) => {
+        setNewMessage((prev) => `${prev}${emoji}`)
+        setIsEmojiPickerOpen(false)
     }
 
     const getMessageStatus = (status: Message["status"]) => {
@@ -515,7 +608,7 @@ export default function ChatsPage() {
                                                     >
                                                         {message.type === "text" ? (
                                                             <p className="text-sm">{message.content}</p>
-                                                        ) : (
+                                                        ) : message.type === "image" ? (
                                                             <div className="overflow-hidden rounded-lg">
                                                                 <img
                                                                     src={message.content || "/placeholder.svg"}
@@ -523,6 +616,20 @@ export default function ChatsPage() {
                                                                     className="h-auto max-w-full rounded-lg"
                                                                 />
                                                             </div>
+                                                        ) : (
+                                                            <a
+                                                                href={message.content}
+                                                                download={message.fileName || "attachment"}
+                                                                className={`block rounded-xl border px-3 py-2 text-sm ${isCurrentUser
+                                                                    ? "border-white/20 bg-white/10 text-white"
+                                                                    : "border-gray-200 bg-gray-50 text-gray-900 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
+                                                                    }`}
+                                                            >
+                                                                <div className="font-medium">{message.fileName || "Attachment"}</div>
+                                                                <div className={`text-xs ${isCurrentUser ? "text-white/80" : "text-gray-500 dark:text-gray-400"}`}>
+                                                                    {formatFileSize(message.fileSize) || "Tải xuống"}
+                                                                </div>
+                                                            </a>
                                                         )}
                                                     </div>
                                                     {isCurrentUser ? (
@@ -550,12 +657,25 @@ export default function ChatsPage() {
 
                         <div className="border-t border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
                             <div className="flex items-center space-x-2">
-                                <Button variant="ghost" size="icon">
+                                <label className={`inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-md text-gray-700 transition hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700 ${isSendingMessage || !selectedThread ? "pointer-events-none opacity-50" : ""}`}>
+                                    <input
+                                        type="file"
+                                        className="hidden"
+                                        onChange={(event) => void handleUploadAsset(event, "file")}
+                                        disabled={isSendingMessage || !selectedThread}
+                                    />
                                     <Paperclip className="w-4 h-4" />
-                                </Button>
-                                <Button variant="ghost" size="icon">
+                                </label>
+                                <label className={`inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-md text-gray-700 transition hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700 ${isSendingMessage || !selectedThread ? "pointer-events-none opacity-50" : ""}`}>
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        className="hidden"
+                                        onChange={(event) => void handleUploadAsset(event, "image")}
+                                        disabled={isSendingMessage || !selectedThread}
+                                    />
                                     <ImageIcon className="w-4 h-4" />
-                                </Button>
+                                </label>
                                 <div className="relative flex-1">
                                     <Input
                                         placeholder={`Nhắn cho ${selectedChatMeta?.name ?? "teammate"}...`}
@@ -565,14 +685,33 @@ export default function ChatsPage() {
                                         disabled={isSendingMessage}
                                         className="bg-gray-100 pr-10 text-gray-900 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
                                     />
-                                    <Button variant="ghost" size="icon" className="absolute right-1 top-1/2 -translate-y-1/2 transform">
-                                        <Smile className="w-4 h-4" />
-                                    </Button>
+                                    <Popover open={isEmojiPickerOpen} onOpenChange={setIsEmojiPickerOpen}>
+                                        <PopoverTrigger asChild>
+                                            <Button variant="ghost" size="icon" className="absolute right-1 top-1/2 -translate-y-1/2 transform">
+                                                <Smile className="w-4 h-4" />
+                                            </Button>
+                                        </PopoverTrigger>
+                                        <PopoverContent className="w-64 p-3" align="end">
+                                            <div className="grid grid-cols-6 gap-2">
+                                                {EMOJI_OPTIONS.map((emoji) => (
+                                                    <button
+                                                        key={emoji}
+                                                        type="button"
+                                                        className="rounded-lg p-2 text-xl transition hover:bg-gray-100"
+                                                        onClick={() => handleInsertEmoji(emoji)}
+                                                    >
+                                                        {emoji}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </PopoverContent>
+                                    </Popover>
                                 </div>
-                                <Button onClick={handleSendMessage} disabled={!newMessage.trim() || isSendingMessage} loading={isSendingMessage}>
+                                <Button onClick={() => void handleSendMessage()} disabled={!newMessage.trim() || isSendingMessage} loading={isSendingMessage}>
                                     <Send className="w-4 h-4" />
                                 </Button>
                             </div>
+                            <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">Hỗ trợ gửi ảnh và tệp tối đa 2MB.</p>
                         </div>
                     </>
                 ) : (

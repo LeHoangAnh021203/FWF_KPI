@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/components/auth-provider";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
-import { departments, registrationRoles, type Department, type UserRole } from "@/lib/auth";
+import { COMPANY_DOMAIN, departments, registrationRoles, type Department, type UserRole } from "@/lib/auth";
 
 type AuthMode = "login" | "register";
 
@@ -36,6 +36,42 @@ function InputField({ label, value, onChange, type = "text", placeholder }: Fiel
         placeholder={placeholder}
         className="rounded-2xl border border-[rgba(55,45,33,0.12)] bg-white/75 px-4 py-3 outline-none transition focus:border-ink"
       />
+    </label>
+  );
+}
+
+function extractEmailLocalPart(email: string) {
+  const normalizedEmail = email.trim();
+
+  if (!normalizedEmail) {
+    return "";
+  }
+
+  return normalizedEmail.split("@")[0] ?? "";
+}
+
+function normalizeCompanyEmailInput(value: string) {
+  const localPart = value.replace(/\s+/g, "").split("@")[0]?.trim() ?? "";
+  return localPart ? `${localPart}${COMPANY_DOMAIN}` : "";
+}
+
+function CompanyEmailField({ value, onChange }: Pick<FieldProps, "value" | "onChange">) {
+  return (
+    <label className="grid gap-2">
+      <span className="text-sm font-medium text-text">Email công ty</span>
+      <div className="flex items-center rounded-2xl border border-[rgba(55,45,33,0.12)] bg-white/75 px-4 py-3 transition focus-within:border-ink">
+        <input
+          type="text"
+          value={extractEmailLocalPart(value)}
+          onChange={(event) => onChange(normalizeCompanyEmailInput(event.target.value))}
+          placeholder="yourname"
+          className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-slate-400"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+        />
+        <span className="ml-2 shrink-0 font-medium text-[#dd6b4d]">{COMPANY_DOMAIN}</span>
+      </div>
     </label>
   );
 }
@@ -260,13 +296,7 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
             />
           ) : null}
 
-          <InputField
-            label="Email công ty"
-            value={email}
-            onChange={setEmail}
-            placeholder="yourname@facewashfox.com"
-            type="email"
-          />
+          <CompanyEmailField value={email} onChange={setEmail} />
 
           {mode === "login" || registerStep === "form" ? (
             <InputField

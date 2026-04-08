@@ -54,7 +54,11 @@ export async function POST(request: Request) {
       sessionUserId,
       threadId: body.threadId,
       senderId,
-      content: body.content
+      content: body.content,
+      type: body.type,
+      fileName: body.fileName,
+      mimeType: body.mimeType,
+      fileSize: body.fileSize
     });
     const participantIds = await getChatThreadParticipantIds(sessionUserId, body.threadId);
     void publishChatEvent(participantIds, {

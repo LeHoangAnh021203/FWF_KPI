@@ -25,5 +25,10 @@ export default function RootLayout({
 }
 
 export const metadata = {
-    generator: 'IT Dept'
+
+    title: "FWF KPI",
+    description: "Face Wash Fox KPI platform",
+    generator: "IT Dept",
+
+
 };

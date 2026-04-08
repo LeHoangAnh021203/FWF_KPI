@@ -122,8 +122,11 @@ type DbChatMessage = {
   _id: string;
   threadId: string;
   senderId: string;
-  type: "text" | "image";
+  type: "text" | "image" | "file";
   content: string;
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
   status: "sent" | "delivered" | "read";
   createdAt: string;
 };
@@ -194,7 +197,10 @@ export type ChatMessageRecord = {
   id: string;
   senderId: string;
   content: string;
-  type: "text" | "image";
+  type: "text" | "image" | "file";
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
   timestamp: string;
   status: "sent" | "delivered" | "read";
 };
@@ -756,6 +762,9 @@ function mapDbChatMessage(message: DbChatMessage): ChatMessageRecord {
     senderId: message.senderId,
     content: message.content,
     type: message.type,
+    fileName: message.fileName,
+    mimeType: message.mimeType,
+    fileSize: message.fileSize,
     timestamp: formatChatTimestamp(message.createdAt),
     status: message.status
   };
@@ -2062,12 +2071,20 @@ export async function sendChatMessage({
   sessionUserId,
   threadId,
   senderId,
-  content
+  content,
+  type = "text",
+  fileName,
+  mimeType,
+  fileSize
 }: {
   sessionUserId: string | null | undefined;
   threadId: string;
   senderId: string;
   content: string;
+  type?: "text" | "image" | "file";
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
 }) {
   const actor = await getSessionActor(sessionUserId);
   if (!actor || actor.person.id !== senderId) {
@@ -2080,24 +2097,43 @@ export async function sendChatMessage({
     throw new Error("Forbidden");
   }
 
+  const normalizedContent = content.trim();
+  if (!normalizedContent) {
+    throw new Error("Message content is required.");
+  }
+
+  if (type === "file" && !fileName) {
+    throw new Error("File name is required.");
+  }
+
   const now = new Date().toISOString();
   const messageId = `${threadId}_${Date.now()}`;
   const messageDocument: DbChatMessage = {
     _id: messageId,
     threadId,
     senderId,
-    type: "text",
-    content,
+    type,
+    content: normalizedContent,
+    fileName,
+    mimeType,
+    fileSize,
     status: "sent",
     createdAt: now
   };
+
+  const lastMessagePreview =
+    type === "image"
+      ? "Da gui mot hinh anh"
+      : type === "file"
+        ? `Da gui tep: ${fileName ?? "file"}`
+        : normalizedContent;
 
   await db.collection<DbChatMessage>("chat_messages").insertOne(messageDocument);
   await db.collection<DbChatThread>("chat_threads").updateOne(
     { _id: threadId },
     {
       $set: {
-        lastMessage: content,
+        lastMessage: lastMessagePreview,
         lastMessageAt: now,
         updatedAt: now
       }
