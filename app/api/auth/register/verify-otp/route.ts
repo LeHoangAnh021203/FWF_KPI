@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { verifyRegistrationOtp } from "@/lib/server/data";
+import { getAdminRealtimePersonIds, verifyRegistrationOtp } from "@/lib/server/data";
+import { publishAppEventToPersons } from "@/lib/server/realtime";
 import { SESSION_COOKIE_NAME } from "@/lib/server/session";
 
 export async function POST(request: Request) {
@@ -11,6 +12,15 @@ export async function POST(request: Request) {
   }
 
   if (!result.user) {
+    if (result.requiresApproval) {
+      const adminRecipients = await getAdminRealtimePersonIds();
+      void publishAppEventToPersons(adminRecipients, {
+        type: "approval.updated",
+        actorId: "system",
+        occurredAt: new Date().toISOString()
+      });
+    }
+
     return NextResponse.json(result);
   }
 

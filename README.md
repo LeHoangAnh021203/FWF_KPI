@@ -11,6 +11,16 @@ npm run dev
 
 Mở `http://localhost:3000`.
 
+## Biến môi trường realtime
+
+Để bật realtime chat bằng Ably, thêm biến sau vào môi trường:
+
+```bash
+ABLY_API_KEY=your-ably-api-key
+```
+
+Nếu chưa cấu hình `ABLY_API_KEY`, chat vẫn hoạt động theo cơ chế fetch hiện tại nhưng chưa có push realtime.
+
 ## Thành phần chính
 
 - `app/page.tsx`: entry page

@@ -1,6 +1,9 @@
 "use client";
 
+import { usePathname } from "next/navigation";
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { closeRealtimeClient } from "@/lib/client/realtime";
+import { clearAppBootstrapCache, loadAppBootstrap } from "@/lib/client/bootstrap";
 import { type Department, type UserAccount, type UserRole } from "@/lib/auth";
 
 type RegisterInput = {
@@ -31,13 +34,22 @@ type AuthContextValue = {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const isAuthPage = pathname === "/login" || pathname === "/register";
   const [users, setUsers] = useState<UserAccount[]>([]);
   const [user, setUser] = useState<UserAccount | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [pendingRegistration, setPendingRegistration] = useState<PendingRegistration | null>(null);
 
   const refreshSession = async () => {
-    const response = await fetch("/api/auth/session", {
+    if (!isAuthPage) {
+      const payload = await loadAppBootstrap({ force: true });
+      setUser(payload.user);
+      setUsers([]);
+      return;
+    }
+
+    const response = await fetch("/api/auth/session?includeUsers=true", {
       credentials: "include",
       cache: "no-store"
     });
@@ -58,7 +70,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let isMounted = true;
 
-    refreshSession()
+    const loadInitialState = async () => {
+      if (!isAuthPage) {
+        const payload = await loadAppBootstrap();
+        if (!isMounted) {
+          return;
+        }
+
+        setUser(payload.user);
+        setUsers([]);
+        return;
+      }
+
+      await refreshSession();
+    };
+
+    loadInitialState()
       .then(() => {
         if (!isMounted) {
           return;
@@ -73,7 +100,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [isAuthPage]);
 
   const value = useMemo<AuthContextValue>(
     () => ({
@@ -155,10 +182,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           method: "POST",
           credentials: "include"
         });
+        closeRealtimeClient();
+        clearAppBootstrapCache();
         setUser(null);
+        setUsers([]);
       }
     }),
-    [isReady, pendingRegistration, user, users]
+    [isAuthPage, isReady, pendingRegistration, user, users]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

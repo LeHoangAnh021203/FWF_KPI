@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { createPersonRecord, getDirectory } from "@/lib/server/data";
+import { createPersonRecord, getAllRealtimePersonIds, getAuthState, getDirectory } from "@/lib/server/data";
+import { publishAppEventToPersons } from "@/lib/server/realtime";
 import { getSessionUserId } from "@/lib/server/session";
 
 export async function GET() {
@@ -12,6 +13,13 @@ export async function POST(request: Request) {
     const sessionUserId = await getSessionUserId();
     const body = await request.json();
     const person = await createPersonRecord(sessionUserId, body);
+    const [authState, recipients] = await Promise.all([getAuthState(sessionUserId), getAllRealtimePersonIds()]);
+    void publishAppEventToPersons(recipients, {
+      type: "directory.updated",
+      actorId: authState.user?.personId ?? person.id,
+      entityId: person.id,
+      occurredAt: new Date().toISOString()
+    });
     return NextResponse.json({ ok: true, person });
   } catch (error) {
     return NextResponse.json(

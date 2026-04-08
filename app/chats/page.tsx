@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
+import { subscribeToPersonChannel } from "@/lib/client/realtime"
 import { useAuth } from "@/components/auth-provider"
 import { useDirectory } from "@/components/directory-provider"
 import { Button } from "@/components/ui/button"
@@ -138,6 +139,23 @@ export default function ChatsPage() {
             setChats([])
         })
     }, [currentUser?.id, people])
+
+    useEffect(() => {
+        if (!currentUser?.id) {
+            return
+        }
+
+        return subscribeToPersonChannel(currentUser.id, (message) => {
+            const payload = message.data as { type?: string } | undefined
+            if (!payload?.type?.startsWith("chat.")) {
+                return
+            }
+
+            void loadChats().catch(() => {
+                // Keep current UI state if a background refresh fails.
+            })
+        })
+    }, [currentUser?.id, people.length])
 
     const availableContacts = useMemo(
         () =>

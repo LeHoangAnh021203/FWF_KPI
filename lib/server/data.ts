@@ -128,6 +128,20 @@ type DbChatMessage = {
   createdAt: string;
 };
 
+type DbSchedule = {
+  _id: string;
+  workspaceTeamId: string;
+  dateKey: string;
+  title: string;
+  description: string;
+  startTime: string;
+  endTime: string;
+  attendeeIds: string[];
+  createdByPersonId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type PendingRegistration = {
   _id?: ObjectId;
   email: string;
@@ -193,6 +207,20 @@ export type ChatThreadRecord = {
   lastMessage: string;
   lastMessageAt: string;
   messages: ChatMessageRecord[];
+};
+
+export type ScheduleRecord = {
+  id: string;
+  projectId: string;
+  dateKey: string;
+  title: string;
+  description: string;
+  startTime: string;
+  endTime: string;
+  attendeeIds: string[];
+  createdByPersonId: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type AccountHistoryRecord = {
@@ -733,6 +761,22 @@ function mapDbChatMessage(message: DbChatMessage): ChatMessageRecord {
   };
 }
 
+function mapDbSchedule(schedule: DbSchedule): ScheduleRecord {
+  return {
+    id: schedule._id,
+    projectId: schedule.workspaceTeamId,
+    dateKey: schedule.dateKey,
+    title: schedule.title,
+    description: schedule.description,
+    startTime: schedule.startTime,
+    endTime: schedule.endTime,
+    attendeeIds: schedule.attendeeIds,
+    createdByPersonId: schedule.createdByPersonId,
+    createdAt: schedule.createdAt,
+    updatedAt: schedule.updatedAt
+  };
+}
+
 function createEmptyTaskGroups(): TaskGroups {
   return {
     "This Week": [],
@@ -754,6 +798,45 @@ export async function getAuthState(userId?: string | null) {
     users: users.map(mapDbUser),
     user: user ? mapDbUser(user) : null
   };
+}
+
+export async function getAllRealtimePersonIds() {
+  const db = await getMongoDb();
+  const users = await db.collection<DbUser>("users").find(
+    { personId: { $type: "string", $ne: "" } },
+    { projection: { personId: 1 } }
+  ).toArray();
+
+  return Array.from(
+    new Set(users.map((user) => user.personId).filter((personId): personId is string => Boolean(personId)))
+  );
+}
+
+export async function getAdminRealtimePersonIds() {
+  const db = await getMongoDb();
+  const users = await db.collection<DbUser>("users").find(
+    { personId: { $type: "string", $ne: "" } }
+  ).toArray();
+
+  return Array.from(
+    new Set(
+      users
+        .map(mapDbUser)
+        .filter((user) => isAdminLikeRole(user.role))
+        .map((user) => user.personId)
+        .filter((personId): personId is string => Boolean(personId))
+    )
+  );
+}
+
+export async function getWorkspaceRealtimePersonIds(projectId: string) {
+  const db = await getMongoDb();
+  const [project, adminPersonIds] = await Promise.all([
+    db.collection<DbWorkspaceTeam>("workspace_teams").findOne({ _id: projectId }),
+    getAdminRealtimePersonIds()
+  ]);
+
+  return Array.from(new Set([...(project?.memberIds ?? []), ...adminPersonIds]));
 }
 
 async function getSessionActor(sessionUserId?: string | null): Promise<SessionActor | null> {
@@ -825,6 +908,30 @@ function canManageTask(actor: SessionActor, task: DbTask) {
   }
 
   return task.assigneeId === actor.person.id;
+}
+
+function canManageSchedules(actor: SessionActor) {
+  return actor.isAdmin || actor.isLeader;
+}
+
+function canManageScheduleAttendees(actor: SessionActor, attendeeIds: string[]) {
+  if (actor.isAdmin) {
+    return true;
+  }
+
+  return attendeeIds.every((attendeeId) => canAccessPerson(actor, attendeeId));
+}
+
+function canViewSchedule(actor: SessionActor, schedule: DbSchedule) {
+  if (actor.isAdmin) {
+    return true;
+  }
+
+  if (actor.isLeader) {
+    return canManageScheduleAttendees(actor, schedule.attendeeIds);
+  }
+
+  return schedule.attendeeIds.includes(actor.person.id);
 }
 
 export async function validateLogin(email: string, password: string) {
@@ -1629,6 +1736,176 @@ export async function updateWorkspaceTask(
   return updatedTask ? mapDbTask(updatedTask) : null;
 }
 
+export async function getScheduleData(
+  sessionUserId: string | null | undefined,
+  projectId?: string | null
+) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) {
+    throw new Error("Unauthorized");
+  }
+
+  const db = await getMongoDb();
+  const normalizedProjectId = projectId?.trim() || "general";
+  const schedules = await db.collection<DbSchedule>("schedules").find(
+    { workspaceTeamId: normalizedProjectId },
+    { sort: { dateKey: 1, startTime: 1, createdAt: 1 } }
+  ).toArray();
+
+  return schedules.filter((schedule) => canViewSchedule(actor, schedule)).map(mapDbSchedule);
+}
+
+export async function createScheduleRecord(
+  sessionUserId: string | null | undefined,
+  input: {
+    projectId?: string | null;
+    dateKey: string;
+    title: string;
+    description: string;
+    startTime: string;
+    endTime: string;
+    attendeeIds: string[];
+  }
+) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) {
+    throw new Error("Unauthorized");
+  }
+
+  if (!canManageSchedules(actor)) {
+    throw new Error("Forbidden");
+  }
+
+  const attendeeIds = Array.from(new Set(input.attendeeIds));
+  if (attendeeIds.length === 0 || !canManageScheduleAttendees(actor, attendeeIds)) {
+    throw new Error("Forbidden");
+  }
+
+  const db = await getMongoDb();
+  const normalizedProjectId = input.projectId?.trim() || "general";
+  if (normalizedProjectId !== "general") {
+    const project = await db.collection<DbWorkspaceTeam>("workspace_teams").findOne({ _id: normalizedProjectId });
+    if (!project || (!actor.isAdmin && !project.memberIds.includes(actor.person.id))) {
+      throw new Error("Forbidden");
+    }
+  }
+
+  const now = new Date().toISOString();
+  const document: DbSchedule = {
+    _id: new ObjectId().toString(),
+    workspaceTeamId: normalizedProjectId,
+    dateKey: input.dateKey,
+    title: input.title.trim(),
+    description: input.description.trim(),
+    startTime: input.startTime,
+    endTime: input.endTime,
+    attendeeIds,
+    createdByPersonId: actor.person.id,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  await db.collection<DbSchedule>("schedules").insertOne(document);
+  return mapDbSchedule(document);
+}
+
+export async function updateScheduleRecord(
+  sessionUserId: string | null | undefined,
+  scheduleId: string,
+  updates: {
+    dateKey: string;
+    title: string;
+    description: string;
+    startTime: string;
+    endTime: string;
+    attendeeIds: string[];
+  }
+) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) {
+    throw new Error("Unauthorized");
+  }
+
+  if (!canManageSchedules(actor)) {
+    throw new Error("Forbidden");
+  }
+
+  const db = await getMongoDb();
+  const existing = await db.collection<DbSchedule>("schedules").findOne({ _id: scheduleId });
+  if (!existing || !canViewSchedule(actor, existing)) {
+    throw new Error("Forbidden");
+  }
+
+  const attendeeIds = Array.from(new Set(updates.attendeeIds));
+  if (attendeeIds.length === 0 || !canManageScheduleAttendees(actor, attendeeIds)) {
+    throw new Error("Forbidden");
+  }
+
+  await db.collection<DbSchedule>("schedules").updateOne(
+    { _id: scheduleId },
+    {
+      $set: {
+        dateKey: updates.dateKey,
+        title: updates.title.trim(),
+        description: updates.description.trim(),
+        startTime: updates.startTime,
+        endTime: updates.endTime,
+        attendeeIds,
+        updatedAt: new Date().toISOString()
+      }
+    }
+  );
+
+  const updated = await db.collection<DbSchedule>("schedules").findOne({ _id: scheduleId });
+  return updated ? mapDbSchedule(updated) : null;
+}
+
+export async function getScheduleRealtimeRecipients(
+  sessionUserId: string | null | undefined,
+  scheduleId: string
+) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) {
+    throw new Error("Unauthorized");
+  }
+
+  const db = await getMongoDb();
+  const existing = await db.collection<DbSchedule>("schedules").findOne({ _id: scheduleId });
+  if (!existing || !canViewSchedule(actor, existing)) {
+    throw new Error("Forbidden");
+  }
+
+  const adminPersonIds = await getAdminRealtimePersonIds();
+
+  return {
+    personIds: Array.from(new Set([...existing.attendeeIds, existing.createdByPersonId, ...adminPersonIds])),
+    projectId: existing.workspaceTeamId
+  };
+}
+
+export async function deleteScheduleRecord(
+  sessionUserId: string | null | undefined,
+  scheduleId: string
+) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) {
+    throw new Error("Unauthorized");
+  }
+
+  if (!canManageSchedules(actor)) {
+    throw new Error("Forbidden");
+  }
+
+  const db = await getMongoDb();
+  const existing = await db.collection<DbSchedule>("schedules").findOne({ _id: scheduleId });
+  if (!existing || !canViewSchedule(actor, existing)) {
+    throw new Error("Forbidden");
+  }
+
+  await db.collection<DbSchedule>("schedules").deleteOne({ _id: scheduleId });
+  return true;
+}
+
 export async function getDocumentsData(sessionUserId?: string | null) {
   const actor = await getSessionActor(sessionUserId);
   if (!actor) {
@@ -1871,6 +2148,21 @@ export async function createOrGetChatThread(sessionUserId: string | null | undef
   );
 
   return threadId;
+}
+
+export async function getChatThreadParticipantIds(sessionUserId: string | null | undefined, threadId: string) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) {
+    throw new Error("Unauthorized");
+  }
+
+  const db = await getMongoDb();
+  const thread = await db.collection<DbChatThread>("chat_threads").findOne({ _id: threadId });
+  if (!thread || !thread.participantIds.includes(actor.person.id) || !thread.participantIds.every((id) => canAccessPerson(actor, id))) {
+    throw new Error("Forbidden");
+  }
+
+  return thread.participantIds;
 }
 
 export async function deleteChatMessage(sessionUserId: string | null | undefined, threadId: string, messageId: string) {

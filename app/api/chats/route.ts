@@ -2,12 +2,14 @@ import { NextResponse } from "next/server";
 import {
   createOrGetChatThread,
   deleteChatMessage,
+  getChatThreadParticipantIds,
   getDirectory,
   getAuthState,
   getChatsForPerson,
   markChatThreadAsRead,
   sendChatMessage
 } from "@/lib/server/data";
+import { publishChatEvent } from "@/lib/server/realtime";
 import { getSessionUserId } from "@/lib/server/session";
 
 export async function GET() {
@@ -54,6 +56,14 @@ export async function POST(request: Request) {
       senderId,
       content: body.content
     });
+    const participantIds = await getChatThreadParticipantIds(sessionUserId, body.threadId);
+    void publishChatEvent(participantIds, {
+      type: "chat.message.created",
+      threadId: body.threadId,
+      actorId: senderId,
+      messageId: message.id,
+      occurredAt: new Date().toISOString()
+    });
 
     return NextResponse.json({ ok: true, message });
   } catch (error) {
@@ -75,7 +85,14 @@ export async function PATCH(request: Request) {
     }
 
     const body = await request.json();
+    const participantIds = await getChatThreadParticipantIds(sessionUserId, body.threadId);
     await markChatThreadAsRead(sessionUserId, body.threadId);
+    void publishChatEvent(participantIds, {
+      type: "chat.thread.read",
+      threadId: body.threadId,
+      actorId: readerId,
+      occurredAt: new Date().toISOString()
+    });
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json(
@@ -96,10 +113,18 @@ export async function DELETE(request: Request) {
     }
 
     const body = await request.json();
+    const participantIds = await getChatThreadParticipantIds(sessionUserId, body.threadId);
     const deleted = await deleteChatMessage(sessionUserId, body.threadId, body.messageId);
     if (!deleted) {
       return NextResponse.json({ ok: false, message: "Message not found or forbidden." }, { status: 404 });
     }
+    void publishChatEvent(participantIds, {
+      type: "chat.message.deleted",
+      threadId: body.threadId,
+      actorId: personId,
+      messageId: body.messageId,
+      occurredAt: new Date().toISOString()
+    });
 
     return NextResponse.json({ ok: true });
   } catch (error) {

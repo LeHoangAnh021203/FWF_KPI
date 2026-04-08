@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import {
   approveRoleApprovalRequest,
+  getAdminRealtimePersonIds,
   getPendingRoleApprovalRequests,
   rejectRoleApprovalRequest
 } from "@/lib/server/data";
+import { publishAppEventToPersons } from "@/lib/server/realtime";
 import { getSessionUserId } from "@/lib/server/session";
 
 export async function GET() {
@@ -24,13 +26,26 @@ export async function POST(request: Request) {
     const sessionUserId = await getSessionUserId();
     const body = await request.json();
     const action = body.action === "reject" ? "reject" : "approve";
+    const adminRecipients = await getAdminRealtimePersonIds();
 
     if (action === "reject") {
       const approvalRequest = await rejectRoleApprovalRequest(sessionUserId, body.requestId ?? "");
+      void publishAppEventToPersons(adminRecipients, {
+        type: "approval.updated",
+        actorId: sessionUserId ?? "system",
+        entityId: approvalRequest.id,
+        occurredAt: new Date().toISOString()
+      });
       return NextResponse.json({ ok: true, request: approvalRequest });
     }
 
     const user = await approveRoleApprovalRequest(sessionUserId, body.requestId ?? "");
+    void publishAppEventToPersons(adminRecipients, {
+      type: "approval.updated",
+      actorId: user.personId ?? sessionUserId ?? "system",
+      entityId: user.id,
+      occurredAt: new Date().toISOString()
+    });
     return NextResponse.json({ ok: true, user: { ...user, password: "" } });
   } catch (error) {
     return NextResponse.json(

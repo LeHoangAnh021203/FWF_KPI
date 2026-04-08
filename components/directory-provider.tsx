@@ -1,6 +1,9 @@
 "use client";
 
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { useAuth } from "@/components/auth-provider";
+import { subscribeToPersonChannel } from "@/lib/client/realtime";
+import { loadAppBootstrap } from "@/lib/client/bootstrap";
 import type { Person } from "@/lib/people";
 
 type CompanyTeam = {
@@ -36,12 +39,13 @@ async function fetchDirectory() {
 }
 
 export function DirectoryProvider({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
   const [people, setPeople] = useState<Person[]>([]);
   const [teams, setTeams] = useState<CompanyTeam[]>([]);
   const [isReady, setIsReady] = useState(false);
 
   const refresh = async () => {
-    const payload = await fetchDirectory();
+    const payload = await loadAppBootstrap({ force: true }).catch(() => fetchDirectory());
     setPeople(payload.people);
     setTeams(payload.teams);
   };
@@ -49,7 +53,8 @@ export function DirectoryProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let isMounted = true;
 
-    fetchDirectory()
+    loadAppBootstrap()
+      .catch(() => fetchDirectory())
       .then((payload) => {
         if (!isMounted) {
           return;
@@ -68,6 +73,23 @@ export function DirectoryProvider({ children }: { children: React.ReactNode }) {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!user?.personId) {
+      return;
+    }
+
+    return subscribeToPersonChannel(user.personId, (message) => {
+      const payload = message.data as { type?: string } | undefined;
+      if (payload?.type !== "directory.updated") {
+        return;
+      }
+
+      void refresh().catch(() => {
+        // Ignore transient realtime refresh failures and keep current snapshot.
+      });
+    });
+  }, [user?.personId]);
 
   const value = useMemo(
     () => ({

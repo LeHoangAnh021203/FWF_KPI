@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { deletePersonRecord, updatePersonRecord } from "@/lib/server/data";
+import { deletePersonRecord, getAllRealtimePersonIds, getAuthState, updatePersonRecord } from "@/lib/server/data";
+import { publishAppEventToPersons } from "@/lib/server/realtime";
 import { getSessionUserId } from "@/lib/server/session";
 
 type RouteContext = {
@@ -16,6 +17,14 @@ export async function PATCH(request: Request, context: RouteContext) {
     if (!person) {
       return NextResponse.json({ ok: false, message: "Person not found." }, { status: 404 });
     }
+
+    const [authState, recipients] = await Promise.all([getAuthState(sessionUserId), getAllRealtimePersonIds()]);
+    void publishAppEventToPersons(recipients, {
+      type: "directory.updated",
+      actorId: authState.user?.personId ?? person.id,
+      entityId: person.id,
+      occurredAt: new Date().toISOString()
+    });
 
     return NextResponse.json({ ok: true, person });
   } catch (error) {
@@ -35,6 +44,14 @@ export async function DELETE(_: Request, context: RouteContext) {
     if (!deleted) {
       return NextResponse.json({ ok: false, message: "Person not found." }, { status: 404 });
     }
+
+    const [authState, recipients] = await Promise.all([getAuthState(sessionUserId), getAllRealtimePersonIds()]);
+    void publishAppEventToPersons(recipients, {
+      type: "directory.updated",
+      actorId: authState.user?.personId ?? personId,
+      entityId: personId,
+      occurredAt: new Date().toISOString()
+    });
 
     return NextResponse.json({ ok: true });
   } catch (error) {

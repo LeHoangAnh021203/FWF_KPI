@@ -1,7 +1,8 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useSearchParams } from "next/navigation"
+import { subscribeToPersonChannel } from "@/lib/client/realtime"
 import NotesSection from "@/components/notes-section"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -52,9 +53,22 @@ interface Note {
 }
 
 interface ScheduleItem {
+    id: string
+    dateKey: string
     title: string
-    time: string
+    description: string
+    startTime: string
+    endTime: string
     attendeeIds: string[]
+}
+
+type ScheduleFormState = {
+    title: string
+    description: string
+    startTime: string
+    endTime: string
+    attendeeIds: string[]
+    teamFilter: string
 }
 
 type SharePermission = "Can view" | "Can comment" | "Can edit"
@@ -119,61 +133,18 @@ export default function MyTaskPage() {
         { personId: "people_4", permission: "Can comment" },
     ])
     const [shareFeedback, setShareFeedback] = useState("")
-
-    const [scheduleData, setScheduleData] = useState<Record<number, ScheduleItem[]>>({
-        15: [
-            {
-                title: "Team Standup",
-                time: "09:00 AM to 09:30 AM",
-                attendeeIds: ["people_0", "people_1"],
-            },
-        ],
-        16: [
-            {
-                title: "Client Review Meeting",
-                time: "02:00 PM to 03:00 PM",
-                attendeeIds: ["people_2", "people_3"],
-            },
-        ],
-        17: [
-            {
-                title: "Kickoff Meeting",
-                time: "01:00 PM to 02:30 PM",
-                attendeeIds: ["people_4", "people_5"],
-            },
-            {
-                title: "Create Wordpress website for event Registration",
-                time: "04:00 PM to 02:30 PM",
-                attendeeIds: ["people_6", "people_7"],
-            },
-            {
-                title: "Create User flow for hotel booking",
-                time: "05:00 PM to 02:30 PM",
-                attendeeIds: ["people_8", "people_9"],
-            },
-        ],
-        18: [
-            {
-                title: "Design Review",
-                time: "10:00 AM to 11:00 AM",
-                attendeeIds: ["people_10"],
-            },
-        ],
-        19: [
-            {
-                title: "Sprint Planning",
-                time: "03:00 PM to 04:30 PM",
-                attendeeIds: ["people_11", "people_12", "people_13"],
-            },
-        ],
-        20: [
-            {
-                title: "Weekly Demo",
-                time: "11:00 AM to 12:00 PM",
-                attendeeIds: ["people_14", "people_15"],
-            },
-        ],
-        21: [],
+    const [isScheduleDialogOpen, setIsScheduleDialogOpen] = useState(false)
+    const [editingScheduleId, setEditingScheduleId] = useState<string | null>(null)
+    const [isScheduleLoading, setIsScheduleLoading] = useState(false)
+    const [isScheduleSubmitting, setIsScheduleSubmitting] = useState(false)
+    const [scheduleData, setScheduleData] = useState<Record<string, ScheduleItem[]>>({})
+    const [scheduleForm, setScheduleForm] = useState<ScheduleFormState>({
+        title: "",
+        description: "",
+        startTime: "09:00",
+        endTime: "10:00",
+        attendeeIds: [],
+        teamFilter: "all",
     })
 
     const handleAddNote = (note: Omit<Note, "id">) => {
@@ -215,15 +186,6 @@ export default function MyTaskPage() {
             setSelectedTask(nextTask)
             setTaskDraft(nextTask)
         }
-    }
-
-    const handleChangeScheduleAttendees = (date: number, itemIndex: number, newAttendeeIds: string[]) => {
-        setScheduleData((prevData) => ({
-            ...prevData,
-            [date]: prevData[date].map((item, index) =>
-                index === itemIndex ? { ...item, attendeeIds: newAttendeeIds } : item,
-            ),
-        }))
     }
 
     const getCurrentWeekDays = () => {
@@ -275,6 +237,9 @@ export default function MyTaskPage() {
         isAdminUser ||
         user?.role === "leader" ||
         currentUser.role.toLowerCase() === "leader"
+    const isCeoUser = user?.role === "ceo"
+    const isLeaderUser = user?.role === "leader" || currentUser.role.toLowerCase() === "leader"
+    const canManageSchedule = isCeoUser || isLeaderUser
     const greetingLabel = `${isAdminUser ? "Admin" : currentTeam?.name ?? "Team"} · ${currentUser.name}`
     const greetingText = useMemo(() => {
         const hour = vietnamNow.getHours()
@@ -349,7 +314,12 @@ export default function MyTaskPage() {
             .filter((task) => currentTeamMemberIds.includes(task.assigneeId) && task.assigneeId !== currentUserId)
     }, [canManageAllTasks, currentTeamMemberIds, currentUserId, projectTasks, selectedProjectId, selectedTimePeriod])
 
-    const currentScheduleItems = scheduleData[selectedDate] || []
+    const currentScheduleKey = new Date(
+        vietnamNow.getFullYear(),
+        vietnamNow.getMonth(),
+        selectedDate,
+    ).toISOString().slice(0, 10)
+    const currentScheduleItems = scheduleData[currentScheduleKey] || []
     const selectedTaskAssignee = taskDraft ? people.find((person) => person.id === taskDraft.assigneeId) : null
     const selectedTaskProject = selectedTask ? projects.find((project) => project.id === selectedTask.projectId) : null
     const taskDetailAssignees = canManageAllTasks ? currentTeamPeople : [currentUser]
@@ -377,6 +347,25 @@ export default function MyTaskPage() {
             return [person.name, person.email].some((value) => value.toLowerCase().includes(searchValue))
         })
     }, [currentUserId, shareSearchQuery])
+    const getScheduleDateKey = (dateNumber: number) => {
+        const scheduleDate = new Date(vietnamNow.getFullYear(), vietnamNow.getMonth(), dateNumber)
+        return scheduleDate.toISOString().slice(0, 10)
+    }
+    const scheduleTeamOptions = useMemo(
+        () => (isCeoUser ? teams : teams.filter((team) => team.id === currentUser.team)),
+        [currentUser.team, isCeoUser, teams],
+    )
+    const availableSchedulePeople = useMemo(() => {
+        if (isCeoUser) {
+            if (scheduleForm.teamFilter === "all") {
+                return people
+            }
+
+            return people.filter((person) => person.team === scheduleForm.teamFilter)
+        }
+
+        return currentTeamPeople
+    }, [currentTeamPeople, isCeoUser, people, scheduleForm.teamFilter])
 
     const handleOpenAddTask = () => {
         setNewTaskForm({
@@ -562,6 +551,244 @@ export default function MyTaskPage() {
             setShareFeedback("Share link copied.")
         } catch {
             setShareFeedback("Unable to copy automatically. Copy the link manually.")
+        }
+    }
+
+    const formatScheduleTimeRange = (startTime: string, endTime: string) => {
+        const formatTime = (value: string) => {
+            const [hours = "00", minutes = "00"] = value.split(":")
+            const hourNumber = Number(hours)
+            const normalizedHour = Number.isNaN(hourNumber) ? 0 : hourNumber
+            const period = normalizedHour >= 12 ? "PM" : "AM"
+            const displayHour = normalizedHour % 12 || 12
+            return `${String(displayHour).padStart(2, "0")}:${minutes} ${period}`
+        }
+
+        return `${formatTime(startTime)} to ${formatTime(endTime)}`
+    }
+
+    const refreshSchedules = async () => {
+        setIsScheduleLoading(true)
+        try {
+            const query = selectedProjectId ? `?projectId=${selectedProjectId}` : ""
+            const response = await fetch(`/api/schedules${query}`, {
+                credentials: "include",
+                cache: "no-store",
+            })
+
+            const payload = (await response.json()) as {
+                ok: boolean
+                schedules?: Array<{
+                    id: string
+                    projectId: string
+                    dateKey: string
+                    title: string
+                    description: string
+                    startTime: string
+                    endTime: string
+                    attendeeIds: string[]
+                }>
+                message?: string
+            }
+
+            if (!response.ok || !payload.ok) {
+                throw new Error(payload.message || "Không thể tải lịch họp.")
+            }
+
+            const groupedSchedules = (payload.schedules ?? []).reduce<Record<string, ScheduleItem[]>>((acc, schedule) => {
+                if (!acc[schedule.dateKey]) {
+                    acc[schedule.dateKey] = []
+                }
+
+                acc[schedule.dateKey].push({
+                    id: schedule.id,
+                    dateKey: schedule.dateKey,
+                    title: schedule.title,
+                    description: schedule.description,
+                    startTime: schedule.startTime,
+                    endTime: schedule.endTime,
+                    attendeeIds: schedule.attendeeIds,
+                })
+
+                return acc
+            }, {})
+
+            setScheduleData(groupedSchedules)
+        } catch (error) {
+            toast({
+                title: "Không thể tải lịch họp",
+                description: error instanceof Error ? error.message : "Vui lòng thử lại sau.",
+                variant: "destructive",
+            })
+        } finally {
+            setIsScheduleLoading(false)
+        }
+    }
+
+    useEffect(() => {
+        void refreshSchedules()
+    }, [selectedProjectId])
+
+    useEffect(() => {
+        if (!currentUser?.id) {
+            return
+        }
+
+        return subscribeToPersonChannel(currentUser.id, (message) => {
+            const payload = message.data as { type?: string; projectId?: string } | undefined
+            if (payload?.type !== "schedule.updated") {
+                return
+            }
+
+            if ((payload.projectId ?? "general") !== (selectedProjectId ?? "general")) {
+                return
+            }
+
+            void refreshSchedules()
+        })
+    }, [currentUser?.id, selectedProjectId])
+
+    const resetScheduleForm = () => {
+        setScheduleForm({
+            title: "",
+            description: "",
+            startTime: "09:00",
+            endTime: "10:00",
+            attendeeIds: [],
+            teamFilter: isCeoUser ? "all" : currentUser.team,
+        })
+        setEditingScheduleId(null)
+    }
+
+    const openCreateScheduleDialog = () => {
+        resetScheduleForm()
+        setIsScheduleDialogOpen(true)
+    }
+
+    const openEditScheduleDialog = (item: ScheduleItem) => {
+        setEditingScheduleId(item.id)
+        setScheduleForm({
+            title: item.title,
+            description: item.description,
+            startTime: item.startTime,
+            endTime: item.endTime,
+            attendeeIds: item.attendeeIds,
+            teamFilter: isCeoUser ? "all" : currentUser.team,
+        })
+        setIsScheduleDialogOpen(true)
+    }
+
+    const handleToggleScheduleAttendee = (personId: string) => {
+        setScheduleForm((prev) => ({
+            ...prev,
+            attendeeIds: prev.attendeeIds.includes(personId)
+                ? prev.attendeeIds.filter((id) => id !== personId)
+                : [...prev.attendeeIds, personId],
+        }))
+    }
+
+    const handleSaveSchedule = async () => {
+        if (!canManageSchedule || isScheduleSubmitting) {
+            return
+        }
+
+        if (!scheduleForm.title.trim() || !scheduleForm.description.trim() || scheduleForm.attendeeIds.length === 0) {
+            toast({
+                title: "Thiếu thông tin buổi họp",
+                description: "Cần nhập tên, nội dung và chọn ít nhất một người tham gia.",
+                variant: "destructive",
+            })
+            return
+        }
+
+        if (scheduleForm.startTime >= scheduleForm.endTime) {
+            toast({
+                title: "Thời gian không hợp lệ",
+                description: "Giờ kết thúc phải lớn hơn giờ bắt đầu.",
+                variant: "destructive",
+            })
+            return
+        }
+
+        setIsScheduleSubmitting(true)
+        try {
+            const payload = {
+                projectId: selectedProjectId,
+                dateKey: currentScheduleKey,
+                title: scheduleForm.title.trim(),
+                description: scheduleForm.description.trim(),
+                startTime: scheduleForm.startTime,
+                endTime: scheduleForm.endTime,
+                attendeeIds: scheduleForm.attendeeIds,
+            }
+
+            const response = await fetch(
+                editingScheduleId ? `/api/schedules/${editingScheduleId}` : "/api/schedules",
+                {
+                    method: editingScheduleId ? "PATCH" : "POST",
+                    headers: { "Content-Type": "application/json" },
+                    credentials: "include",
+                    body: JSON.stringify(payload),
+                },
+            )
+
+            const result = (await response.json()) as { ok: boolean; message?: string }
+            if (!response.ok || !result.ok) {
+                throw new Error(result.message || "Không thể lưu lịch họp.")
+            }
+
+            await refreshSchedules()
+
+            toast({
+                title: editingScheduleId ? "Cập nhật lịch thành công" : "Tạo lịch thành công",
+                description: editingScheduleId
+                    ? "Buổi họp đã được cập nhật."
+                    : "Buổi họp mới đã được thêm vào lịch.",
+            })
+            setIsScheduleDialogOpen(false)
+            resetScheduleForm()
+        } catch (error) {
+            toast({
+                title: "Không thể lưu lịch họp",
+                description: error instanceof Error ? error.message : "Vui lòng thử lại sau.",
+                variant: "destructive",
+            })
+        } finally {
+            setIsScheduleSubmitting(false)
+        }
+    }
+
+    const handleDeleteSchedule = async (scheduleId: string) => {
+        if (!canManageSchedule) {
+            return
+        }
+
+        const confirmed = window.confirm("Xóa lịch họp này?")
+        if (!confirmed) {
+            return
+        }
+
+        try {
+            const response = await fetch(`/api/schedules/${scheduleId}`, {
+                method: "DELETE",
+                credentials: "include",
+            })
+            const result = (await response.json()) as { ok: boolean; message?: string }
+            if (!response.ok || !result.ok) {
+                throw new Error(result.message || "Không thể xóa lịch họp.")
+            }
+
+            await refreshSchedules()
+            toast({
+                title: "Đã xóa lịch họp",
+                description: "Buổi họp đã được gỡ khỏi lịch.",
+            })
+        } catch (error) {
+            toast({
+                title: "Không thể xóa lịch họp",
+                description: error instanceof Error ? error.message : "Vui lòng thử lại sau.",
+                variant: "destructive",
+            })
         }
     }
 
@@ -1243,9 +1470,17 @@ export default function MyTaskPage() {
                                     <Calendar className="w-5 h-5 mr-2" />
                                     Schedule
                                 </CardTitle>
-                                <Button variant="ghost" size="icon">
-                                    <MoreHorizontal className="w-4 h-4" />
-                                </Button>
+                                <div className="flex items-center gap-2">
+                                    {canManageSchedule ? (
+                                        <Button variant="outline" size="sm" onClick={openCreateScheduleDialog}>
+                                            <Plus className="mr-2 h-4 w-4" />
+                                            Tạo lịch
+                                        </Button>
+                                    ) : null}
+                                    <Button variant="ghost" size="icon">
+                                        <MoreHorizontal className="w-4 h-4" />
+                                    </Button>
+                                </div>
                             </div>
                         </CardHeader>
                         <CardContent>
@@ -1278,76 +1513,69 @@ export default function MyTaskPage() {
                             {/* Schedule Items */}
                             <div className="space-y-3 min-h-[192px]">
                                 {currentScheduleItems.length > 0 ? (
-                                    currentScheduleItems.map((item, index) => (
+                                    currentScheduleItems.map((item) => (
                                         <div
-                                            key={index}
+                                            key={item.id}
                                             className="flex items-start space-x-3 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700"
                                         >
                                             <div className="w-2 h-2 rounded-full bg-blue-500 mt-2" />
                                             <div className="flex-1 min-w-0">
                                                 <p className="text-sm font-medium text-gray-900 dark:text-white truncate">{item.title}</p>
-                                                <p className="text-xs text-gray-500 dark:text-gray-400">{item.time}</p>
+                                                <p className="text-xs text-gray-500 dark:text-gray-400">
+                                                    {formatScheduleTimeRange(item.startTime, item.endTime)}
+                                                </p>
+                                                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400 line-clamp-2">{item.description}</p>
                                             </div>
-                                            <DropdownMenu>
-                                                <DropdownMenuTrigger asChild>
-                                                    <div className="flex -space-x-1 cursor-pointer">
-                                                        {item.attendeeIds.map((attendeeId) => {
-                                                            const attendee = people.find((p) => p.id === attendeeId) ?? unknownPerson
-                                                            return (
-                                                                <Avatar key={attendeeId} className="w-5 h-5 border border-white dark:border-gray-800">
-                                                                    <AvatarImage src={attendee.imageURL || "/placeholder.svg"} />
-                                                                    <AvatarFallback className="bg-gray-200 dark:bg-gray-600 text-gray-900 dark:text-white">
-                                                                        {attendee.name
-                                                                            .split(" ")
-                                                                            .map((n) => n[0])
-                                                                            .join("")}
-                                                                    </AvatarFallback>
-                                                                </Avatar>
-                                                            )
-                                                        })}
-                                                        <div className="w-5 h-5 border border-white dark:border-gray-800 rounded-full bg-gray-100 dark:bg-gray-700 flex items-center justify-center">
-                                                            <ChevronDown className="w-2 h-2" />
-                                                        </div>
-                                                    </div>
-                                                </DropdownMenuTrigger>
-                                                <DropdownMenuContent className="bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700">
-                                                    {people.map((person) => (
-                                                        <DropdownMenuItem
-                                                            key={person.id}
-                                                            onClick={() => {
-                                                                const currentAttendees = item.attendeeIds
-                                                                const newAttendees = currentAttendees.includes(person.id)
-                                                                    ? currentAttendees.filter((id) => id !== person.id)
-                                                                    : [...currentAttendees, person.id]
-                                                                handleChangeScheduleAttendees(selectedDate, index, newAttendees)
-                                                            }}
-                                                            className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700"
-                                                        >
-                                                            <Avatar className="w-5 h-5 mr-2">
-                                                                <AvatarImage src={person.imageURL || "/placeholder.svg"} />
+                                            <div className="flex items-start gap-2">
+                                                <div className="flex -space-x-1 cursor-pointer">
+                                                    {item.attendeeIds.map((attendeeId) => {
+                                                        const attendee = people.find((p) => p.id === attendeeId) ?? unknownPerson
+                                                        return (
+                                                            <Avatar key={attendeeId} className="w-5 h-5 border border-white dark:border-gray-800">
+                                                                <AvatarImage src={attendee.imageURL || "/placeholder.svg"} />
                                                                 <AvatarFallback className="bg-gray-200 dark:bg-gray-600 text-gray-900 dark:text-white">
-                                                                    {person.name
+                                                                    {attendee.name
                                                                         .split(" ")
                                                                         .map((n) => n[0])
                                                                         .join("")}
                                                                 </AvatarFallback>
                                                             </Avatar>
-                                                            <div className="flex flex-col flex-1">
-                                                                <span className="text-sm">{person.name}</span>
-                                                                <span className="text-xs text-gray-500 dark:text-gray-400">{person.email}</span>
-                                                            </div>
-                                                            {item.attendeeIds.includes(person.id) && (
-                                                                <CheckCircle className="w-4 h-4 ml-auto text-green-600 dark:text-green-400" />
-                                                            )}
-                                                        </DropdownMenuItem>
-                                                    ))}
-                                                </DropdownMenuContent>
-                                            </DropdownMenu>
-                                            <Button variant="ghost" size="icon" className="w-6 h-6">
-                                                <MoreHorizontal className="w-3 h-3" />
-                                            </Button>
+                                                        )
+                                                    })}
+                                                </div>
+                                                {canManageSchedule ? (
+                                                    <DropdownMenu>
+                                                        <DropdownMenuTrigger asChild>
+                                                            <Button variant="ghost" size="icon" className="w-6 h-6">
+                                                                <MoreHorizontal className="w-3 h-3" />
+                                                            </Button>
+                                                        </DropdownMenuTrigger>
+                                                        <DropdownMenuContent className="bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700">
+                                                            <DropdownMenuItem
+                                                                onClick={() => openEditScheduleDialog(item)}
+                                                                className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700"
+                                                            >
+                                                                <Edit3 className="mr-2 h-4 w-4" />
+                                                                Sửa lịch
+                                                            </DropdownMenuItem>
+                                                            <DropdownMenuItem
+                                                                onClick={() => handleDeleteSchedule(item.id)}
+                                                                className="text-red-600 dark:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-700"
+                                                            >
+                                                                <Trash2 className="mr-2 h-4 w-4" />
+                                                                Xóa lịch
+                                                            </DropdownMenuItem>
+                                                        </DropdownMenuContent>
+                                                    </DropdownMenu>
+                                                ) : null}
+                                            </div>
                                         </div>
                                     ))
+                                ) : isScheduleLoading ? (
+                                    <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+                                        <Calendar className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                        <p className="text-sm">Đang tải lịch họp...</p>
+                                    </div>
                                 ) : (
                                     <div className="text-center py-8 text-gray-500 dark:text-gray-400">
                                         <Calendar className="w-8 h-8 mx-auto mb-2 opacity-50" />
@@ -1357,6 +1585,162 @@ export default function MyTaskPage() {
                             </div>
                         </CardContent>
                     </Card>
+
+                    <Dialog
+                        open={isScheduleDialogOpen}
+                        onOpenChange={(open) => {
+                            setIsScheduleDialogOpen(open)
+                            if (!open) {
+                                resetScheduleForm()
+                            }
+                        }}
+                    >
+                        <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto bg-white dark:bg-gray-800">
+                            <DialogHeader>
+                                <DialogTitle className="text-gray-900 dark:text-white">
+                                    {editingScheduleId ? "Chỉnh sửa lịch họp" : "Tạo lịch họp"}
+                                </DialogTitle>
+                            </DialogHeader>
+                            <div className="grid gap-4 py-2">
+                                <div className="grid gap-2">
+                                    <Label htmlFor="schedule-title">Tên buổi họp</Label>
+                                    <Input
+                                        id="schedule-title"
+                                        value={scheduleForm.title}
+                                        onChange={(event) =>
+                                            setScheduleForm((prev) => ({ ...prev, title: event.target.value }))
+                                        }
+                                        placeholder="Ví dụ: Họp kickoff dự án"
+                                    />
+                                </div>
+                                <div className="grid gap-2">
+                                    <Label htmlFor="schedule-description">Nội dung buổi họp</Label>
+                                    <Textarea
+                                        id="schedule-description"
+                                        value={scheduleForm.description}
+                                        onChange={(event) =>
+                                            setScheduleForm((prev) => ({ ...prev, description: event.target.value }))
+                                        }
+                                        placeholder="Mô tả nội dung chính của buổi họp"
+                                    />
+                                </div>
+                                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                                    <div className="grid gap-2">
+                                        <Label htmlFor="schedule-start-time">Giờ bắt đầu</Label>
+                                        <Input
+                                            id="schedule-start-time"
+                                            type="time"
+                                            value={scheduleForm.startTime}
+                                            onChange={(event) =>
+                                                setScheduleForm((prev) => ({ ...prev, startTime: event.target.value }))
+                                            }
+                                        />
+                                    </div>
+                                    <div className="grid gap-2">
+                                        <Label htmlFor="schedule-end-time">Giờ kết thúc</Label>
+                                        <Input
+                                            id="schedule-end-time"
+                                            type="time"
+                                            value={scheduleForm.endTime}
+                                            onChange={(event) =>
+                                                setScheduleForm((prev) => ({ ...prev, endTime: event.target.value }))
+                                            }
+                                        />
+                                    </div>
+                                </div>
+                                {isCeoUser ? (
+                                    <div className="grid gap-2">
+                                        <Label>Lọc thành viên theo team</Label>
+                                        <Select
+                                            value={scheduleForm.teamFilter}
+                                            onValueChange={(value) =>
+                                                setScheduleForm((prev) => ({ ...prev, teamFilter: value }))
+                                            }
+                                        >
+                                            <SelectTrigger>
+                                                <SelectValue placeholder="Chọn team" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                <SelectItem value="all">Tất cả team</SelectItem>
+                                                {scheduleTeamOptions.map((team) => (
+                                                    <SelectItem key={team.id} value={team.id}>
+                                                        {team.name}
+                                                    </SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
+                                ) : null}
+                                <div className="grid gap-2">
+                                    <Label>Người tham gia</Label>
+                                    <div className="max-h-64 space-y-2 overflow-y-auto rounded-xl border border-gray-200 p-3 dark:border-gray-700">
+                                        {availableSchedulePeople.map((person) => {
+                                            const isSelected = scheduleForm.attendeeIds.includes(person.id)
+                                            return (
+                                                <button
+                                                    key={person.id}
+                                                    type="button"
+                                                    onClick={() => handleToggleScheduleAttendee(person.id)}
+                                                    className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition ${
+                                                        isSelected
+                                                            ? "border-blue-500 bg-blue-50 dark:border-blue-500 dark:bg-blue-900/20"
+                                                            : "border-gray-200 bg-white hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:hover:bg-gray-700/40"
+                                                    }`}
+                                                >
+                                                    <div className="flex min-w-0 items-center gap-3">
+                                                        <Avatar className="h-9 w-9">
+                                                            <AvatarImage src={person.imageURL || "/placeholder.svg"} />
+                                                            <AvatarFallback>
+                                                                {person.name
+                                                                    .split(" ")
+                                                                    .map((part) => part[0])
+                                                                    .join("")}
+                                                            </AvatarFallback>
+                                                        </Avatar>
+                                                        <div className="min-w-0">
+                                                            <p className="truncate text-sm font-medium text-gray-900 dark:text-white">
+                                                                {person.name}
+                                                            </p>
+                                                            <p className="truncate text-xs text-gray-500 dark:text-gray-400">
+                                                                {person.email}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                    {isSelected ? (
+                                                        <CheckCircle className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                                                    ) : null}
+                                                </button>
+                                            )
+                                        })}
+                                    </div>
+                                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                                        {isCeoUser
+                                            ? "CEO có thể chọn tất cả thành viên trong hệ thống và lọc theo từng team."
+                                            : `Leader chỉ có thể chọn thành viên trong team ${currentTeam?.name ?? "của mình"}.`}
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="flex justify-end gap-2">
+                                <Button
+                                    variant="outline"
+                                    onClick={() => {
+                                        setIsScheduleDialogOpen(false)
+                                        resetScheduleForm()
+                                    }}
+                                    disabled={isScheduleSubmitting}
+                                >
+                                    Hủy
+                                </Button>
+                                <Button onClick={handleSaveSchedule} loading={isScheduleSubmitting}>
+                                    {isScheduleSubmitting
+                                        ? "Đang lưu..."
+                                        : editingScheduleId
+                                            ? "Cập nhật lịch"
+                                            : "Tạo lịch"}
+                                </Button>
+                            </div>
+                        </DialogContent>
+                    </Dialog>
 
                     {/* Notes */}
                     <NotesSection

@@ -3,8 +3,9 @@
 import type React from "react"
 import type { Route } from "next"
 
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
+import { subscribeToPersonChannel } from "@/lib/client/realtime"
 import { Button } from "./ui/button"
 import { Input } from "@/components/ui/input"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -166,7 +167,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         },
     ]
 
-    const loadApprovalRequests = async () => {
+    const loadApprovalRequests = useCallback(async () => {
         if (!isAdminUser) {
             setApprovalRequests([])
             return
@@ -184,7 +185,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         const payload = (await response.json()) as { ok: boolean; requests?: ApprovalRequest[] }
         setApprovalRequests(payload.ok ? payload.requests ?? [] : [])
-    }
+    }, [isAdminUser])
 
     const currentTeamPeople = useMemo(
         () => people.filter((person) => person.team === currentUser.team),
@@ -324,7 +325,28 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
     useEffect(() => {
         void loadApprovalRequests()
-    }, [isAdminUser, user?.id])
+    }, [loadApprovalRequests, user?.id])
+
+    useEffect(() => {
+        if (!user?.personId) {
+            return
+        }
+
+        return subscribeToPersonChannel(user.personId, (message) => {
+            const payload = message.data as { type?: string } | undefined
+
+            if (payload?.type === "approval.updated") {
+                void loadApprovalRequests()
+                return
+            }
+
+            if (payload?.type === "directory.updated") {
+                void refreshSession().catch(() => {
+                    // Ignore transient realtime refresh failures.
+                })
+            }
+        })
+    }, [loadApprovalRequests, refreshSession, user?.personId])
 
     return (
         <div className="flex h-screen bg-gray-50 dark:bg-gray-900">

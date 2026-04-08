@@ -2,6 +2,8 @@
 
 import * as React from "react"
 import { useAuth } from "@/components/auth-provider"
+import { subscribeToPersonChannel } from "@/lib/client/realtime"
+import { loadAppBootstrap } from "@/lib/client/bootstrap"
 import { findPersonForAuthUser } from "@/lib/people"
 
 export interface Project {
@@ -1184,20 +1186,22 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     const [isReady, setIsReady] = React.useState(false)
 
     const refreshWorkspace = React.useCallback(async () => {
-        const response = await fetch("/api/workspace", {
-            credentials: "include",
-            cache: "no-store",
+        const payload = await loadAppBootstrap({ force: true }).catch(async () => {
+            const response = await fetch("/api/workspace", {
+                credentials: "include",
+                cache: "no-store",
+            })
+
+            if (!response.ok) {
+                throw new Error("Failed to load workspace.")
+            }
+
+            return (await response.json()) as {
+                currentUserId: string
+                projects: Project[]
+                projectTasks: Record<string, TaskGroups>
+            }
         })
-
-        if (!response.ok) {
-            throw new Error("Failed to load workspace.")
-        }
-
-        const payload = (await response.json()) as {
-            currentUserId: string
-            projects: Project[]
-            projectTasks: Record<string, TaskGroups>
-        }
 
         setCurrentUserId(payload.currentUserId)
         setProjects(payload.projects.map(normalizeProject))
@@ -1207,7 +1211,17 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
     React.useEffect(() => {
         let isMounted = true
 
-        refreshWorkspace()
+        loadAppBootstrap()
+            .then((payload) => {
+                if (!isMounted) {
+                    return
+                }
+
+                setCurrentUserId(payload.currentUserId)
+                setProjects(payload.projects.map(normalizeProject))
+                setProjectTasks(payload.projectTasks)
+            })
+            .catch(() => refreshWorkspace())
             .catch(() => {
                 if (!isMounted) {
                     return
@@ -1227,6 +1241,23 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
             isMounted = false
         }
     }, [refreshWorkspace, user])
+
+    React.useEffect(() => {
+        if (!user?.personId) {
+            return
+        }
+
+        return subscribeToPersonChannel(user.personId, (message) => {
+            const payload = message.data as { type?: string } | undefined
+            if (payload?.type !== "workspace.updated") {
+                return
+            }
+
+            void refreshWorkspace().catch(() => {
+                // Ignore transient realtime refresh failures and keep current snapshot.
+            })
+        })
+    }, [refreshWorkspace, user?.personId])
 
     const addProject = React.useCallback(async (project: Omit<Project, "id">) => {
         const response = await fetch("/api/workspace/projects", {

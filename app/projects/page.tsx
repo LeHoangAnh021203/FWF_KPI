@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { useWorkspace, type TimePeriod } from "@/components/workspace-context"
+import { isAdminLikeRole } from "@/lib/auth"
 import { findPersonForAuthUser, getTeamById } from "@/lib/people"
 
 type ProjectSummary = {
@@ -29,6 +30,7 @@ export default function ProjectsPage() {
     const { user } = useAuth()
     const { people, teams } = useDirectory()
     const { currentUserId, projects, projectTasks } = useWorkspace()
+    const isAdmin = isAdminLikeRole(user?.role)
 
     const currentUser =
         findPersonForAuthUser(user, people) ??
@@ -42,7 +44,13 @@ export default function ProjectsPage() {
             team: "product",
         }
 
-    const teamMemberIds = useMemo(() => people.filter((person) => person.team === currentUser.team).map((person) => person.id), [currentUser.team])
+    const teamMemberIds = useMemo(
+        () =>
+            isAdmin
+                ? people.map((person) => person.id)
+                : people.filter((person) => person.team === currentUser.team).map((person) => person.id),
+        [currentUser.team, isAdmin, people],
+    )
 
     const visibleProjects = useMemo<ProjectSummary[]>(() => {
         return projects
@@ -51,7 +59,7 @@ export default function ProjectsPage() {
                 const orderedPeriods: TimePeriod[] = ["This Week", "Last Week", "This Month"]
                 const visibleMembers = project.memberIds.filter((memberId) => teamMemberIds.includes(memberId))
 
-                if (!project.memberIds.includes(currentUserId)) {
+                if (!isAdmin && !project.memberIds.includes(currentUserId)) {
                     return null
                 }
 
@@ -77,7 +85,7 @@ export default function ProjectsPage() {
                 }
             })
             .filter(Boolean) as ProjectSummary[]
-    }, [currentUserId, projectTasks, projects, teamMemberIds])
+    }, [currentUserId, isAdmin, projectTasks, projects, teamMemberIds])
 
     const totals = useMemo(
         () => ({
@@ -96,8 +104,9 @@ export default function ProjectsPage() {
                     <div>
                         <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Teams</h1>
                         <p className="mt-2 text-gray-600 dark:text-gray-400">
-                            Theo dõi các team bạn đang tham gia cùng những thành viên được cấp quyền hiển thị trong team {getTeamById(currentUser.team, teams)?.name ?? ""}.
-                            
+                            {isAdmin
+                                ? "Theo dõi tất cả team đang tồn tại trong hệ thống và các thành viên thuộc từng team."
+                                : `Theo dõi các team bạn đang tham gia cùng những thành viên được cấp quyền hiển thị trong team ${getTeamById(currentUser.team, teams)?.name ?? ""}.`}
                         </p>
                     </div>
                 </div>

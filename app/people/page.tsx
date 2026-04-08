@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
+import { subscribeToPersonChannel } from "@/lib/client/realtime"
 import { useAuth } from "@/components/auth-provider"
 import { useDirectory } from "@/components/directory-provider"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
@@ -157,6 +158,38 @@ export default function PeoplePage() {
                 setIsHistoryLoading(false)
             })
     }, [isAdmin, isHistoryDialogOpen])
+
+    useEffect(() => {
+        if (!isAdmin || !user?.personId || !isHistoryDialogOpen) {
+            return
+        }
+
+        return subscribeToPersonChannel(user.personId, (message) => {
+            const payload = message.data as { type?: string } | undefined
+            if (payload?.type !== "approval.updated") {
+                return
+            }
+
+            setIsHistoryLoading(true)
+            fetch("/api/admin/account-history", {
+                credentials: "include",
+                cache: "no-store",
+            })
+                .then(async (response) => {
+                    const nextPayload = (await response.json()) as {
+                        ok: boolean
+                        history?: AccountHistoryItem[]
+                    }
+
+                    if (response.ok && nextPayload.ok) {
+                        setAccountHistory(nextPayload.history ?? [])
+                    }
+                })
+                .finally(() => {
+                    setIsHistoryLoading(false)
+                })
+        })
+    }, [isAdmin, isHistoryDialogOpen, user?.personId])
 
     const getHistoryActionDate = (item: AccountHistoryItem) => {
         if (item.status === "approved") {
