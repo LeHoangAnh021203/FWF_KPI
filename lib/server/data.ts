@@ -195,18 +195,35 @@ export type ChatThreadRecord = {
   messages: ChatMessageRecord[];
 };
 
-export type RoleApprovalRequestRecord = {
+export type AccountHistoryRecord = {
   id: string;
   email: string;
   name: string;
   role: UserRole;
   department: Department;
+  status: "otp_pending" | "pending" | "approved" | "rejected";
   createdAt: string;
+  updatedAt: string;
+  otpVerifiedAt?: string;
+  expiresAt?: string;
+  approvedAt?: string;
+  rejectedAt?: string;
 };
 
 const supportedTeamIds = companyTeams.map((team) => team.id);
 const supportedTeamIdSet = new Set(supportedTeamIds);
 const supportedPersonRoleSet = new Set<string>(personDisplayRoles);
+const DIRECTORY_SYNC_TTL_MS = 5 * 60 * 1000;
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __fwfDirectorySyncState__:
+    | {
+        lastSyncedAt: number;
+        inFlight?: Promise<void>;
+      }
+    | undefined;
+}
 
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
@@ -368,6 +385,38 @@ async function syncCompanyDirectory(db: Awaited<ReturnType<typeof getMongoDb>>) 
   );
 }
 
+async function ensureCompanyDirectorySynced(
+  db: Awaited<ReturnType<typeof getMongoDb>>,
+  options?: { force?: boolean }
+) {
+  const now = Date.now();
+  const state =
+    global.__fwfDirectorySyncState__ ??
+    (global.__fwfDirectorySyncState__ = { lastSyncedAt: 0 });
+
+  if (!options?.force && state.lastSyncedAt && now - state.lastSyncedAt < DIRECTORY_SYNC_TTL_MS) {
+    return;
+  }
+
+  if (!options?.force && state.inFlight) {
+    await state.inFlight;
+    return;
+  }
+
+  const syncPromise = syncCompanyDirectory(db)
+    .then(() => {
+      state.lastSyncedAt = Date.now();
+    })
+    .finally(() => {
+      if (state.inFlight === syncPromise) {
+        state.inFlight = undefined;
+      }
+    });
+
+  state.inFlight = syncPromise;
+  await syncPromise;
+}
+
 function findPersonForUser(user: UserAccount, people: Person[]) {
   if (user.personId) {
     const matchedById = people.find((person) => person.id === user.personId);
@@ -493,14 +542,33 @@ function mapRequestedRoleToDisplayRole(role: UserRole) {
   return "Nhân viên";
 }
 
-function mapRoleApprovalRequest(request: DbRoleApprovalRequest): RoleApprovalRequestRecord {
+function mapRoleApprovalRequest(request: DbRoleApprovalRequest): AccountHistoryRecord {
   return {
     id: String(request._id),
     email: request.email,
     name: request.name,
     role: request.role,
     department: request.department,
-    createdAt: request.createdAt
+    status: request.status,
+    createdAt: request.createdAt,
+    updatedAt: request.updatedAt,
+    otpVerifiedAt: request.otpVerifiedAt,
+    approvedAt: request.approvedAt,
+    rejectedAt: request.rejectedAt
+  };
+}
+
+function mapPendingRegistration(record: PendingRegistration): AccountHistoryRecord {
+  return {
+    id: String(record._id ?? record.email),
+    email: record.email,
+    name: record.name,
+    role: record.role,
+    department: record.department,
+    status: "otp_pending",
+    createdAt: record.createdAt,
+    updatedAt: record.createdAt,
+    expiresAt: record.expiresAt
   };
 }
 
@@ -694,7 +762,7 @@ async function getSessionActor(sessionUserId?: string | null): Promise<SessionAc
   }
 
   const db = await getMongoDb();
-  await syncCompanyDirectory(db);
+  await ensureCompanyDirectorySynced(db);
   const [userDocument, peopleDocuments] = await Promise.all([
     db.collection<DbUser>("users").findOne({ _id: sessionUserId }),
     db.collection<DbPerson>("people").find({}).toArray()
@@ -947,7 +1015,7 @@ export async function verifyRegistrationOtp(email: string, otp: string) {
 
 export async function getDirectory() {
   const db = await getMongoDb();
-  await syncCompanyDirectory(db);
+  await ensureCompanyDirectorySynced(db);
   const [people, teams] = await Promise.all([
     db.collection<DbPerson>("people").find({}, { sort: { name: 1 } }).toArray(),
     db.collection<DbCompanyTeam>("company_teams").find(
@@ -998,7 +1066,7 @@ export async function createPersonRecord(
   await requireAdminActor(sessionUserId);
 
   const db = await getMongoDb();
-  await syncCompanyDirectory(db);
+  await ensureCompanyDirectorySynced(db);
   const normalizedEmail = normalizeEmail(input.email);
   const normalizedRole = normalizePersonDisplayRole(input.role);
 
@@ -1056,7 +1124,7 @@ export async function updatePersonRecord(
   await requireAdminActor(sessionUserId);
 
   const db = await getMongoDb();
-  await syncCompanyDirectory(db);
+  await ensureCompanyDirectorySynced(db);
   const existingPerson = await db.collection<DbPerson>("people").findOne({ _id: personId });
   if (!existingPerson) {
     return null;
@@ -1133,7 +1201,7 @@ export async function updateOwnProfile(
   }
 
   const db = await getMongoDb();
-  await syncCompanyDirectory(db);
+  await ensureCompanyDirectorySynced(db);
 
   const existingPerson = await db.collection<DbPerson>("people").findOne({ _id: actor.person.id });
   if (!existingPerson) {
@@ -1193,6 +1261,28 @@ export async function getPendingRoleApprovalRequests(sessionUserId: string | nul
   ).toArray();
 
   return requests.map(mapRoleApprovalRequest);
+}
+
+export async function getRoleApprovalHistory(sessionUserId: string | null | undefined) {
+  await requireAdminActor(sessionUserId);
+
+  const db = await getMongoDb();
+  const [requests, pendingRegistrations] = await Promise.all([
+    db.collection<DbRoleApprovalRequest>("role_approval_requests").find(
+      { status: { $in: ["pending", "approved", "rejected"] } },
+      { sort: { updatedAt: -1, createdAt: -1 } }
+    ).toArray(),
+    db.collection<PendingRegistration>("pending_registrations").find(
+      {},
+      { sort: { createdAt: -1 } }
+    ).toArray()
+  ]);
+
+  return [...requests.map(mapRoleApprovalRequest), ...pendingRegistrations.map(mapPendingRegistration)].sort((a, b) => {
+    const aTime = new Date(a.updatedAt).getTime();
+    const bTime = new Date(b.updatedAt).getTime();
+    return bTime - aTime;
+  });
 }
 
 export async function approveRoleApprovalRequest(sessionUserId: string | null | undefined, requestId: string) {

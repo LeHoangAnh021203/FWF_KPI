@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useAuth } from "@/components/auth-provider"
 import { useDirectory } from "@/components/directory-provider"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
@@ -25,6 +25,8 @@ import { findPersonForAuthUser, getTeamById, isPersonWorking, personDisplayRoles
 import {
     ChevronDown,
     Clock,
+    CheckCircle2,
+    History,
     Filter,
     Grid3X3,
     List,
@@ -35,6 +37,7 @@ import {
     Trash2,
     UserPlus,
     Users,
+    XCircle,
 } from "lucide-react"
 
 type ViewMode = "list" | "grid" | "teams"
@@ -48,6 +51,23 @@ type PersonFormState = {
     start: string
     end: string
     timezone: string
+}
+
+type AccountHistoryFilter = "week" | "month" | "custom"
+
+type AccountHistoryItem = {
+    id: string
+    email: string
+    name: string
+    role: "admin" | "ceo" | "leader" | "employee"
+    department: string
+    status: "otp_pending" | "pending" | "approved" | "rejected"
+    createdAt: string
+    updatedAt: string
+    otpVerifiedAt?: string
+    expiresAt?: string
+    approvedAt?: string
+    rejectedAt?: string
 }
 
 const DEFAULT_FORM: PersonFormState = {
@@ -71,6 +91,12 @@ export default function PeoplePage() {
     const [editingPerson, setEditingPerson] = useState<Person | null>(null)
     const [personForm, setPersonForm] = useState<PersonFormState>(DEFAULT_FORM)
     const [isSubmitting, setIsSubmitting] = useState(false)
+    const [isHistoryDialogOpen, setIsHistoryDialogOpen] = useState(false)
+    const [accountHistory, setAccountHistory] = useState<AccountHistoryItem[]>([])
+    const [isHistoryLoading, setIsHistoryLoading] = useState(false)
+    const [historyFilter, setHistoryFilter] = useState<AccountHistoryFilter>("week")
+    const [customStartDate, setCustomStartDate] = useState("")
+    const [customEndDate, setCustomEndDate] = useState("")
     const isAdmin = isAdminLikeRole(user?.role)
     const currentUser = findPersonForAuthUser(user, people)
     const currentTeamId = currentUser?.team ?? ""
@@ -96,6 +122,133 @@ export default function PeoplePage() {
         },
         {} as Record<string, Person[]>,
     )
+
+    useEffect(() => {
+        if (!isAdmin || !isHistoryDialogOpen) {
+            return
+        }
+
+        setIsHistoryLoading(true)
+        fetch("/api/admin/account-history", {
+            credentials: "include",
+            cache: "no-store",
+        })
+            .then(async (response) => {
+                const payload = (await response.json()) as {
+                    ok: boolean
+                    history?: AccountHistoryItem[]
+                    message?: string
+                }
+
+                if (!response.ok || !payload.ok) {
+                    throw new Error(payload.message || "Không thể tải lịch sử tài khoản.")
+                }
+
+                setAccountHistory(payload.history ?? [])
+            })
+            .catch((error) => {
+                toast({
+                    title: "Không thể tải lịch sử tài khoản",
+                    description: error instanceof Error ? error.message : "Vui lòng thử lại sau.",
+                    variant: "destructive",
+                })
+            })
+            .finally(() => {
+                setIsHistoryLoading(false)
+            })
+    }, [isAdmin, isHistoryDialogOpen])
+
+    const getHistoryActionDate = (item: AccountHistoryItem) => {
+        if (item.status === "approved") {
+            return item.approvedAt ?? item.updatedAt
+        }
+
+        if (item.status === "rejected") {
+            return item.rejectedAt ?? item.updatedAt
+        }
+
+        if (item.status === "pending") {
+            return item.otpVerifiedAt ?? item.createdAt
+        }
+
+        return item.createdAt
+    }
+
+    const getHistoryStatusMeta = (status: AccountHistoryItem["status"]) => {
+        switch (status) {
+            case "approved":
+                return {
+                    label: "Đã duyệt",
+                    className: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300",
+                    icon: CheckCircle2,
+                }
+            case "rejected":
+                return {
+                    label: "Từ chối",
+                    className: "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300",
+                    icon: XCircle,
+                }
+            case "pending":
+                return {
+                    label: "Chờ duyệt",
+                    className: "bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-300",
+                    icon: History,
+                }
+            default:
+                return {
+                    label: "Chờ xác thực OTP",
+                    className: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300",
+                    icon: History,
+                }
+        }
+    }
+
+    const filteredAccountHistory = useMemo(() => {
+        const now = new Date()
+
+        return accountHistory.filter((item) => {
+            const actionDate = new Date(getHistoryActionDate(item))
+            if (Number.isNaN(actionDate.getTime())) {
+                return false
+            }
+
+            if (historyFilter === "week") {
+                const diffMs = now.getTime() - actionDate.getTime()
+                return diffMs >= 0 && diffMs <= 7 * 24 * 60 * 60 * 1000
+            }
+
+            if (historyFilter === "month") {
+                return (
+                    actionDate.getFullYear() === now.getFullYear() &&
+                    actionDate.getMonth() === now.getMonth()
+                )
+            }
+
+            if (!customStartDate || !customEndDate) {
+                return true
+            }
+
+            const startDate = new Date(`${customStartDate}T00:00:00`)
+            const endDate = new Date(`${customEndDate}T23:59:59`)
+            return actionDate >= startDate && actionDate <= endDate
+        })
+    }, [accountHistory, customEndDate, customStartDate, historyFilter])
+
+    const formatHistoryDate = (value?: string) => {
+        if (!value) {
+            return "-"
+        }
+
+        const date = new Date(value)
+        if (Number.isNaN(date.getTime())) {
+            return "-"
+        }
+
+        return new Intl.DateTimeFormat("vi-VN", {
+            dateStyle: "medium",
+            timeStyle: "short",
+        }).format(date)
+    }
 
     const updatePersonForm = <K extends keyof PersonFormState>(key: K, value: PersonFormState[K]) => {
         setPersonForm((prev) => ({ ...prev, [key]: value }))
@@ -352,12 +505,18 @@ export default function PeoplePage() {
                             Manage your team members and view their availability
                         </p>
                     </div>
-                    {isAdmin && (
-                        <Button onClick={openCreateDialog}>
-                            <UserPlus className="mr-2 h-4 w-4" />
-                            Thêm nhân sự
-                        </Button>
-                    )}
+                    {isAdmin ? (
+                        <div className="flex items-center gap-2">
+                            <Button variant="outline" onClick={() => setIsHistoryDialogOpen(true)}>
+                                <History className="mr-2 h-4 w-4" />
+                                Lịch sử tài khoản
+                            </Button>
+                            <Button onClick={openCreateDialog}>
+                                <UserPlus className="mr-2 h-4 w-4" />
+                                Thêm nhân sự
+                            </Button>
+                        </div>
+                    ) : null}
                 </div>
             </div>
 
@@ -524,6 +683,117 @@ export default function PeoplePage() {
                         </Button>
                         <Button onClick={handleSubmitPerson} disabled={isSubmitting}>
                             {isSubmitting ? "Đang lưu..." : editingPerson ? "Cập nhật" : "Thêm nhân sự"}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog open={isHistoryDialogOpen} onOpenChange={setIsHistoryDialogOpen}>
+                <DialogContent className="sm:max-w-4xl">
+                    <DialogHeader>
+                        <DialogTitle>Lịch sử tài khoản</DialogTitle>
+                        <DialogDescription>
+                            Theo dõi các tài khoản đã được duyệt thành công hoặc bị từ chối.
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    <div className="grid gap-4 py-2">
+                        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                            <div className="grid gap-2">
+                                <Label htmlFor="history-filter">Lọc theo thời gian</Label>
+                                <Select value={historyFilter} onValueChange={(value: AccountHistoryFilter) => setHistoryFilter(value)}>
+                                    <SelectTrigger id="history-filter" className="w-[180px]">
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="week">Tuần này</SelectItem>
+                                        <SelectItem value="month">Tháng này</SelectItem>
+                                        <SelectItem value="custom">Khoảng ngày</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
+
+                            {historyFilter === "custom" ? (
+                                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                    <div className="grid gap-2">
+                                        <Label htmlFor="history-start">Từ ngày</Label>
+                                        <Input
+                                            id="history-start"
+                                            type="date"
+                                            value={customStartDate}
+                                            onChange={(event) => setCustomStartDate(event.target.value)}
+                                        />
+                                    </div>
+                                    <div className="grid gap-2">
+                                        <Label htmlFor="history-end">Đến ngày</Label>
+                                        <Input
+                                            id="history-end"
+                                            type="date"
+                                            value={customEndDate}
+                                            onChange={(event) => setCustomEndDate(event.target.value)}
+                                        />
+                                    </div>
+                                </div>
+                            ) : null}
+                        </div>
+
+                        <div className="rounded-xl border border-gray-200 dark:border-gray-700">
+                            <div className="grid grid-cols-[minmax(0,1.6fr)_160px_180px] gap-4 border-b border-gray-200 bg-gray-50 px-4 py-3 text-sm font-medium text-gray-700 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200">
+                                <span>Tài khoản</span>
+                                <span>Trạng thái</span>
+                                <span>Thời điểm xử lý</span>
+                            </div>
+
+                            <div className="max-h-[420px] overflow-y-auto">
+                                {isHistoryLoading ? (
+                                    <div className="px-4 py-8 text-sm text-gray-500 dark:text-gray-400">
+                                        Đang tải lịch sử tài khoản...
+                                    </div>
+                                ) : filteredAccountHistory.length === 0 ? (
+                                    <div className="px-4 py-8 text-sm text-gray-500 dark:text-gray-400">
+                                        Không có dữ liệu lịch sử trong bộ lọc hiện tại.
+                                    </div>
+                                ) : (
+                                    filteredAccountHistory.map((item) => (
+                                        <div
+                                            key={item.id}
+                                            className="grid grid-cols-[minmax(0,1.6fr)_160px_180px] gap-4 border-b border-gray-100 px-4 py-4 last:border-b-0 dark:border-gray-800"
+                                        >
+                                            <div className="min-w-0">
+                                                <p className="truncate font-medium text-gray-900 dark:text-white">{item.name}</p>
+                                                <p className="truncate text-sm text-gray-600 dark:text-gray-400">{item.email}</p>
+                                                <p className="mt-1 text-xs text-gray-500 dark:text-gray-500">
+                                                    {item.role.toUpperCase()} · {item.department}
+                                                </p>
+                                            </div>
+                                            <div className="flex items-center">
+                                                {(() => {
+                                                    const statusMeta = getHistoryStatusMeta(item.status)
+                                                    const StatusIcon = statusMeta.icon
+
+                                                    return (
+                                                <Badge
+                                                    className={statusMeta.className}
+                                                >
+                                                    <StatusIcon className="mr-1 h-3.5 w-3.5" />
+                                                    {statusMeta.label}
+                                                </Badge>
+                                                    )
+                                                })()}
+                                            </div>
+                                            <div className="text-sm text-gray-600 dark:text-gray-400">
+                                                {formatHistoryDate(getHistoryActionDate(item))}
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    <DialogFooter>
+                        <Button variant="outline" onClick={() => setIsHistoryDialogOpen(false)}>
+                            Đóng
                         </Button>
                     </DialogFooter>
                 </DialogContent>
