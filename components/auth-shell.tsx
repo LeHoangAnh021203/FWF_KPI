@@ -1,0 +1,383 @@
+"use client";
+
+import Link from "next/link";
+import type { Route } from "next";
+import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { useAuth } from "@/components/auth-provider";
+import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
+import { departments, registrationRoles, type Department, type UserRole } from "@/lib/auth";
+
+type AuthMode = "login" | "register";
+
+const roleLabels: Record<UserRole, string> = {
+  admin: "Admin",
+  ceo: "CEO",
+  employee: "Nhân viên",
+  leader: "Leader"
+};
+
+type FieldProps = {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  type?: string;
+  placeholder?: string;
+};
+
+function InputField({ label, value, onChange, type = "text", placeholder }: FieldProps) {
+  return (
+    <label className="grid gap-2">
+      <span className="text-sm font-medium text-text">{label}</span>
+      <input
+        type={type}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="rounded-2xl border border-[rgba(55,45,33,0.12)] bg-white/75 px-4 py-3 outline-none transition focus:border-ink"
+      />
+    </label>
+  );
+}
+
+function maskEmail(email: string) {
+  const normalizedEmail = email.trim();
+  const [localPart = "", domain = ""] = normalizedEmail.split("@");
+
+  if (!localPart || !domain) {
+    return normalizedEmail;
+  }
+
+  if (localPart.length <= 2) {
+    return `${localPart[0] ?? ""}***@${domain}`;
+  }
+
+  return `${localPart.slice(0, 2)}***${localPart.slice(-1)}@${domain}`;
+}
+
+export function AuthShell({ mode }: { mode: AuthMode }) {
+  const router = useRouter();
+  const { login, requestRegistrationOtp, verifyRegistrationOtp, users } = useAuth();
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [department, setDepartment] = useState<Department>("IT");
+  const [role, setRole] = useState<UserRole>("employee");
+  const [otp, setOtp] = useState("");
+  const [otpPreview, setOtpPreview] = useState("");
+  const [registerStep, setRegisterStep] = useState<"form" | "otp">("form");
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [resendCountdown, setResendCountdown] = useState(30);
+
+  const maskedEmail = useMemo(() => maskEmail(email), [email]);
+
+  useEffect(() => {
+    if (mode !== "register" || registerStep !== "otp" || resendCountdown <= 0) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setResendCountdown((prev) => prev - 1);
+    }, 1000);
+
+    return () => window.clearTimeout(timeout);
+  }, [mode, registerStep, resendCountdown]);
+
+  async function handleResendOtp() {
+    setError("");
+    setSuccess("");
+
+    const result = await requestRegistrationOtp({
+      name,
+      email,
+      password,
+      role,
+      department
+    });
+
+    if (!result.ok) {
+      setError(result.message ?? "Gửi lại OTP thất bại.");
+      return;
+    }
+
+    setOtp("");
+    setOtpPreview(result.otp ?? "");
+    setResendCountdown(30);
+    setSuccess("Mã OTP mới đã được gửi tới email công ty.");
+  }
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setSuccess("");
+
+    if (mode === "login") {
+      const result = await login(email, password);
+      if (!result.ok) {
+        setError(result.message ?? "Đăng nhập thất bại.");
+        return;
+      }
+      router.replace("/dashboard" as Route);
+      return;
+    }
+
+    if (!name.trim()) {
+      setError("Vui lòng nhập họ và tên.");
+      return;
+    }
+
+    if (password.trim().length < 6) {
+      setError("Mật khẩu cần tối thiểu 6 ký tự.");
+      return;
+    }
+
+    if (registerStep === "form") {
+      const result = await requestRegistrationOtp({
+        name,
+        email,
+        password,
+        role,
+        department
+      });
+
+      if (!result.ok) {
+        setError(result.message ?? "Gửi OTP thất bại.");
+        return;
+      }
+
+      setOtpPreview(result.otp ?? "");
+      setRegisterStep("otp");
+      setResendCountdown(30);
+      setSuccess("OTP đã được gửi tới email công ty. Nhập mã xác nhận để hoàn tất đăng ký.");
+      return;
+    }
+
+    const result = await verifyRegistrationOtp(email, otp);
+
+    if (!result.ok) {
+      setError(result.message ?? "Xác minh OTP thất bại.");
+      return;
+    }
+
+    router.replace("/dashboard" as Route);
+  }
+
+  return (
+    <div className="grid min-h-screen gap-6 p-4 lg:grid-cols-[1.1fr_0.9fr] lg:p-6">
+      <section className="rounded-[32px] border border-[rgba(55,45,33,0.12)] bg-[linear-gradient(145deg,rgba(42,49,66,0.96),rgba(78,72,60,0.94))] p-8 text-white shadow-float backdrop-blur-xl lg:p-10">
+        <p className="mb-2 text-[11px] uppercase tracking-[0.24em] text-white/70">Face Wash Fox</p>
+        <h1 className="max-w-xl text-4xl font-semibold leading-tight">
+          Task + KPI platform theo phòng ban 
+        </h1>
+        <p className="mt-4 max-w-2xl text-sm leading-7 text-white/76">
+        Dưới đây là quy định và hướng dẫn đăng ký.
+        </p>
+
+        <div className="mt-8 grid gap-4 md:grid-cols-2">
+          <div className="rounded-[24px] border border-white/10 bg-white/8 p-5">
+            <p className="text-sm uppercase tracking-[0.18em] text-white/60">Quy định mail</p>
+            <strong className="mt-3 block text-2xl">@facewashfox.com</strong>
+            <p className="mt-2 text-sm leading-7 text-white/70">
+              Chỉ email công ty mới được tạo tài khoản và đăng nhập.
+            </p>
+          </div>
+          <div className="rounded-[24px] border border-white/10 bg-white/8 p-5">
+            <p className="text-sm uppercase tracking-[0.18em] text-white/60">Tài khoản mẫu</p>
+            <ul className="mt-3 space-y-2 text-sm leading-7 text-white/70">
+              {users.slice(0, 1).map((item) => (
+                <li key={item.email}>
+                  {item.email} · {roleLabels[item.role]} · {item.department}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-2 text-xs text-white/50">Mật khẩu mẫu: 123</p>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-[32px] border border-[rgba(55,45,33,0.12)] bg-[rgba(255,252,247,0.8)] p-8 shadow-float backdrop-blur-xl lg:p-10">
+        <p className="mb-2 text-[11px] uppercase tracking-[0.24em] text-muted">
+          {mode === "login" ? "Sign In" : "Sign Up"}
+        </p>
+        <h2 className="text-3xl font-semibold text-text">
+          {mode === "login"
+            ? "Đăng nhập tài khoản công ty"
+            : registerStep === "form"
+              ? "Tạo tài khoản theo phòng ban"
+              : "Xác nhận email bằng OTP"}
+        </h2>
+        <p className="mt-3 text-sm leading-7 text-muted">
+          {mode === "login"
+            ? "Đăng nhập bằng email nội bộ để nhận giao diện và quyền tương ứng."
+            : registerStep === "form"
+              ? "Đăng ký bằng email công ty, chọn phòng ban và vai trò để demo hệ thống."
+              : "Tài khoản chỉ được tạo sau khi OTP được xác nhận thành công."}
+        </p>
+
+        <form onSubmit={handleSubmit} className="mt-8 grid gap-5">
+          {mode === "register" && registerStep === "form" ? (
+            <InputField
+              label="Họ và tên"
+              value={name}
+              onChange={setName}
+              placeholder="Ví dụ: Nguyen Van A"
+            />
+          ) : null}
+
+          <InputField
+            label="Email công ty"
+            value={email}
+            onChange={setEmail}
+            placeholder="yourname@facewashfox.com"
+            type="email"
+          />
+
+          {mode === "login" || registerStep === "form" ? (
+            <InputField
+              label="Mật khẩu"
+              value={password}
+              onChange={setPassword}
+              placeholder="Nhập mật khẩu"
+              type="password"
+            />
+          ) : null}
+
+          {mode === "register" && registerStep === "form" ? (
+            <>
+              <label className="grid gap-2">
+                <span className="text-sm font-medium text-text">Phòng ban</span>
+                <select
+                  value={department}
+                  onChange={(event) => setDepartment(event.target.value as Department)}
+                  className="rounded-2xl border border-[rgba(55,45,33,0.12)] bg-white/75 px-4 py-3 outline-none transition focus:border-ink"
+                >
+                  {departments.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm font-medium text-text">Vai trò</span>
+                <select
+                  value={role}
+                  onChange={(event) => setRole(event.target.value as UserRole)}
+                  className="rounded-2xl border border-[rgba(55,45,33,0.12)] bg-white/75 px-4 py-3 outline-none transition focus:border-ink"
+                >
+                  {registrationRoles.map((item) => (
+                    <option key={item} value={item}>
+                      {roleLabels[item]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          ) : null}
+
+          {mode === "register" && registerStep === "otp" ? (
+            <>
+              <div className="overflow-hidden rounded-[28px] border border-[rgba(123,145,199,0.18)] bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(247,249,255,0.96))] shadow-[0_28px_90px_rgba(120,146,220,0.18)]">
+                <div className="px-8 pb-8 pt-8 text-center">
+                  <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-[rgba(92,126,255,0.12)]">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      className="h-10 w-10 text-[#3b6af5]"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                    >
+                      <path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5v-9Z" />
+                      <path d="m5 7 7 5 7-5" />
+                    </svg>
+                  </div>
+                  <h3 className="text-[3rem] font-semibold tracking-[-0.04em] text-[#151b2f]">Verification Code</h3>
+                  <p className="mt-3 text-[15px] text-[#7080a0]">
+                    Chúng tôi đã gửi mã xác minh 6 số tới <span className="font-medium text-[#51648f]">{maskedEmail}</span>
+                  </p>
+                </div>
+
+                <div className="px-6 pb-8">
+                  <div className="flex justify-center">
+                    <InputOTP
+                      maxLength={6}
+                      value={otp}
+                      onChange={setOtp}
+                      containerClassName="gap-4"
+                      className="justify-center"
+                    >
+                      <InputOTPGroup className="gap-4">
+                        {Array.from({ length: 6 }).map((_, index) => (
+                          <InputOTPSlot
+                            key={index}
+                            index={index}
+                            className="h-24 w-[4.6rem] rounded-[18px] border border-[rgba(135,150,190,0.2)] bg-white text-3xl font-semibold text-[#151b2f] shadow-[0_10px_24px_rgba(120,146,220,0.08)] first:rounded-[18px] first:border last:rounded-[18px] focus-within:border-[#3b6af5] data-[active=true]:border-[#3b6af5] data-[active=true]:ring-4 data-[active=true]:ring-[#3b6af5]/15"
+                          />
+                        ))}
+                      </InputOTPGroup>
+                    </InputOTP>
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : null}
+
+          {error ? (
+            <div className="rounded-2xl border border-danger/20 bg-danger/10 px-4 py-3 text-sm text-danger">
+              {error}
+            </div>
+          ) : null}
+
+          {success ? (
+            <div className="rounded-2xl border border-mint/20 bg-mint/10 px-4 py-3 text-sm text-mint">
+              {success}
+              {process.env.NEXT_PUBLIC_OTP_DEBUG === "true" && otpPreview ? (
+                <>
+                  {" "}
+                  OTP demo: <strong>{otpPreview}</strong>
+                </>
+              ) : null}
+            </div>
+          ) : null}
+
+          <button
+            type="submit"
+            className={`px-5 py-3 font-medium text-white ${
+              mode === "register" && registerStep === "otp"
+                ? "rounded-2xl bg-[linear-gradient(180deg,#95afff,#84a0f5)] text-[15px] shadow-[0_18px_40px_rgba(120,146,220,0.22)]"
+                : "rounded-full bg-[linear-gradient(135deg,#2a3142,#dd6b4d)]"
+            }`}
+          >
+            {mode === "login" ? "Đăng nhập" : registerStep === "form" ? "Gửi OTP" : "Verify Code"}
+          </button>
+        </form>
+
+        {mode === "register" && registerStep === "otp" ? (
+          <div className="mx-[-2rem] mt-6 border-t border-[rgba(123,145,199,0.14)] px-8 pt-8 text-center text-[15px] text-[#7080a0]">
+            Didn't receive the code?{" "}
+            <button
+              type="button"
+              onClick={handleResendOtp}
+              disabled={resendCountdown > 0}
+              className="font-semibold text-[#3b6af5] disabled:cursor-not-allowed disabled:text-[#9aa7c7]"
+            >
+              {resendCountdown > 0 ? `Resend Code in ${resendCountdown}s` : "Resend Code"}
+            </button>
+          </div>
+        ) : (
+          <div className="mt-6 text-sm text-muted">
+            {mode === "login" ? "Chưa có tài khoản?" : "Đã có tài khoản?"}{" "}
+            <Link
+              href={(mode === "login" ? "/register" : "/login") as Route}
+              className="font-medium text-ink underline underline-offset-4"
+            >
+              {mode === "login" ? "Đăng ký ngay" : "Đăng nhập"}
+            </Link>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}

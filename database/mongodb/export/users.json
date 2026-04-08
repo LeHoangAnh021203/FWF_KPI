@@ -1,0 +1,26 @@
+[
+  {
+    "_id": "u-people-0",
+    "name": "Kiều Anh",
+    "email": "anh@facewashfox.com",
+    "password": "123",
+    "personId": "people_0",
+    "role": "employee",
+    "department": "Marketing",
+    "verified": true,
+    "createdAt": "2026-04-07T02:53:21.134Z",
+    "updatedAt": "2026-04-07T02:53:21.134Z"
+  },
+  {
+    "_id": "u-people-3",
+    "name": "Minh Hieu",
+    "email": "hieu@facewashfox.com",
+    "password": "123",
+    "personId": "people_3",
+    "role": "manager",
+    "department": "Marketing",
+    "verified": true,
+    "createdAt": "2026-04-07T02:53:21.134Z",
+    "updatedAt": "2026-04-07T02:53:21.134Z"
+  }
+]

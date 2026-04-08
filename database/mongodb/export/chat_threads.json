@@ -1,0 +1,80 @@
+[
+  {
+    "_id": "people_0__people_1",
+    "type": "individual",
+    "participantIds": [
+      "people_0",
+      "people_1"
+    ],
+    "teamId": "marketing",
+    "lastMessage": "Cập nhật tiến độ task giữa Kiều Anh và Quốc Trọng",
+    "lastMessageAt": "2026-04-07T02:53:21.134Z",
+    "createdAt": "2026-04-07T02:53:21.134Z",
+    "updatedAt": "2026-04-07T02:53:21.134Z"
+  },
+  {
+    "_id": "people_0__people_2",
+    "type": "individual",
+    "participantIds": [
+      "people_0",
+      "people_2"
+    ],
+    "teamId": "marketing",
+    "lastMessage": "Cập nhật tiến độ task giữa Kiều Anh và Quảng Lâm",
+    "lastMessageAt": "2026-04-07T02:53:21.134Z",
+    "createdAt": "2026-04-07T02:53:21.134Z",
+    "updatedAt": "2026-04-07T02:53:21.134Z"
+  },
+  {
+    "_id": "people_0__people_3",
+    "type": "individual",
+    "participantIds": [
+      "people_0",
+      "people_3"
+    ],
+    "teamId": "marketing",
+    "lastMessage": "Cập nhật tiến độ task giữa Kiều Anh và Minh Hiếu",
+    "lastMessageAt": "2026-04-07T02:53:21.134Z",
+    "createdAt": "2026-04-07T02:53:21.134Z",
+    "updatedAt": "2026-04-07T02:53:21.134Z"
+  },
+  {
+    "_id": "people_1__people_2",
+    "type": "individual",
+    "participantIds": [
+      "people_1",
+      "people_2"
+    ],
+    "teamId": "marketing",
+    "lastMessage": "Cập nhật tiến độ task giữa Quốc Trọng và Quảng Lâm",
+    "lastMessageAt": "2026-04-07T02:53:21.134Z",
+    "createdAt": "2026-04-07T02:53:21.134Z",
+    "updatedAt": "2026-04-07T02:53:21.134Z"
+  },
+  {
+    "_id": "people_1__people_3",
+    "type": "individual",
+    "participantIds": [
+      "people_1",
+      "people_3"
+    ],
+    "teamId": "marketing",
+    "lastMessage": "Cập nhật tiến độ task giữa Quốc Trọng và Minh Hiếu",
+    "lastMessageAt": "2026-04-07T02:53:21.134Z",
+    "createdAt": "2026-04-07T02:53:21.134Z",
+    "updatedAt": "2026-04-07T02:53:21.134Z"
+  },
+  {
+    "_id": "people_2__people_3",
+    "type": "individual",
+    "participantIds": [
+      "people_2",
+      "people_3"
+    ],
+    "teamId": "marketing",
+    "lastMessage": "Cập nhật tiến độ task giữa Quảng Lâm và Minh Hiếu",
+    "lastMessageAt": "2026-04-07T02:53:21.134Z",
+    "createdAt": "2026-04-07T02:53:21.134Z",
+    "updatedAt": "2026-04-07T02:53:21.134Z"
+  }
+]

@@ -1,0 +1,62 @@
+[
+  {
+    "_id": "people_0",
+    "name": "Kiều Anh",
+    "role": "Ads",
+    "email": "anh@facewashfox.com",
+    "imageURL": "https://res.cloudinary.com/ds574fco0/image/upload/v1753690876/people/0_riwhwx.jpg",
+    "teamId": "marketing",
+    "workingHours": {
+      "start": "09:00",
+      "end": "17:00",
+      "timezone": "UTC"
+    },
+    "createdAt": "2026-04-07T02:53:21.134Z",
+    "updatedAt": "2026-04-07T02:53:21.134Z"
+  },
+  {
+    "_id": "people_1",
+    "name": "Quốc Trọng",
+    "role": "Edit",
+    "email": "trong@facewashfox.com",
+    "imageURL": "https://res.cloudinary.com/ds574fco0/image/upload/v1753690877/people/1_ndgrxc.jpg",
+    "teamId": "marketing",
+    "workingHours": {
+      "start": "08:00",
+      "end": "16:00",
+      "timezone": "UTC"
+    },
+    "createdAt": "2026-04-07T02:53:21.134Z",
+    "updatedAt": "2026-04-07T02:53:21.134Z"
+  },
+  {
+    "_id": "people_2",
+    "name": "Quảng Lâm",
+    "role": "Ads",
+    "email": "lam@facewashfox.com",
+    "imageURL": "https://res.cloudinary.com/ds574fco0/image/upload/v1753690877/people/2_qz3dx8.jpg",
+    "teamId": "marketing",
+    "workingHours": {
+      "start": "10:00",
+      "end": "18:00",
+      "timezone": "UTC"
+    },
+    "createdAt": "2026-04-07T02:53:21.134Z",
+    "updatedAt": "2026-04-07T02:53:21.134Z"
+  },
+  {
+    "_id": "people_3",
+    "name": "Minh Hiếu",
+    "role": "Leader",
+    "email": "hieu@facewashfox.com",
+    "imageURL": "https://res.cloudinary.com/ds574fco0/image/upload/v1753690877/people/2_qz3dx8.jpg",
+    "teamId": "marketing",
+    "workingHours": {
+      "start": "10:00",
+      "end": "18:00",
+      "timezone": "UTC"
+    },
+    "createdAt": "2026-04-07T02:53:21.134Z",
+    "updatedAt": "2026-04-07T02:53:21.134Z"
+  }
+]

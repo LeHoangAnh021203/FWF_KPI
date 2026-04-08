@@ -1,0 +1,38 @@
+{
+  "generatedAt": "2026-04-07T02:53:21.134Z",
+  "databaseName": "fwf_kpi",
+  "collections": [
+    {
+      "name": "company_teams",
+      "count": 5
+    },
+    {
+      "name": "people",
+      "count": 4
+    },
+    {
+      "name": "users",
+      "count": 2
+    },
+    {
+      "name": "workspace_teams",
+      "count": 2
+    },
+    {
+      "name": "tasks",
+      "count": 53
+    },
+    {
+      "name": "documents",
+      "count": 12
+    },
+    {
+      "name": "chat_threads",
+      "count": 6
+    },
+    {
+      "name": "chat_messages",
+      "count": 12
+    }
+  ]
+}
