@@ -19,6 +19,7 @@ import { toast } from "@/components/ui/use-toast"
 import { useAuth } from "@/components/auth-provider"
 import { useDirectory } from "@/components/directory-provider"
 import { type NewTaskInput, type Task, type TimePeriod, useWorkspace } from "@/components/workspace-context"
+import { isAdminLikeRole } from "@/lib/auth"
 import { findPersonForAuthUser, getTeamById } from "@/lib/people"
 import {
     Share,
@@ -108,6 +109,8 @@ export default function MyTaskPage() {
     const [isTeamTasksOpen, setIsTeamTasksOpen] = useState(false)
     const [selectedTask, setSelectedTask] = useState<Task | null>(null)
     const [taskDraft, setTaskDraft] = useState<Task | null>(null)
+    const [isCreatingTask, setIsCreatingTask] = useState(false)
+    const [isUpdatingTask, setIsUpdatingTask] = useState(false)
     const [shareSearchQuery, setShareSearchQuery] = useState("")
     const [sharePermission, setSharePermission] = useState<SharePermission>("Can view")
     const [generalAccess, setGeneralAccess] = useState<"Restricted" | "Team" | "Anyone with link">("Restricted")
@@ -238,31 +241,41 @@ export default function MyTaskPage() {
     const selectedProjectId = searchParams.get("projectId")
     const selectedProject = projects.find((project) => project.id === selectedProjectId)
     const defaultProjectId = selectedProjectId ?? projects[0]?.id ?? ""
+    const isAdminUser = isAdminLikeRole(user?.role)
     const currentUser =
         findPersonForAuthUser(user, people) ??
         people.find((person) => person.id === currentUserId) ?? {
             id: user?.id ?? "guest-user",
             name: user?.name ?? "Guest User",
-            role: user?.role === "admin" ? "Admin" : "Member",
+            role: isAdminUser ? "Admin" : "Member",
             email: user?.email ?? "",
             imageURL: "/placeholder.svg",
             workingHours: { start: "09:00", end: "17:00", timezone: "UTC" },
-            team: user?.role === "admin" ? "all" : "product",
+            team: isAdminUser ? "all" : "product",
         }
+    const unknownPerson = {
+        id: "unknown-person",
+        name: "Unknown",
+        role: "Nhân viên",
+        email: "",
+        imageURL: "/placeholder.svg",
+        workingHours: { start: "09:00", end: "17:00", timezone: "UTC+7" },
+        team: currentUser.team,
+    }
     const currentTeam = getTeamById(currentUser.team, teams)
     const currentTeamPeople = useMemo(
         () =>
-            user?.role === "admin"
+            isAdminUser
                 ? people
                 : people.filter((person) => person.team === currentUser.team),
-        [currentUser.team, people, user?.role],
+        [currentUser.team, isAdminUser, people],
     )
     const currentTeamMemberIds = useMemo(() => currentTeamPeople.map((person) => person.id), [currentTeamPeople])
     const canManageAllTasks =
-        user?.role === "admin" ||
+        isAdminUser ||
         user?.role === "leader" ||
         currentUser.role.toLowerCase() === "leader"
-    const greetingLabel = `${user?.role === "admin" ? "Admin" : currentTeam?.name ?? "Team"} · ${currentUser.name}`
+    const greetingLabel = `${isAdminUser ? "Admin" : currentTeam?.name ?? "Team"} · ${currentUser.name}`
     const greetingText = useMemo(() => {
         const hour = vietnamNow.getHours()
 
@@ -409,20 +422,25 @@ export default function MyTaskPage() {
     }
 
     const handleSubmitTask = async () => {
-        if (!newTaskForm.name.trim() || !newTaskForm.projectId) {
+        if (!newTaskForm.name.trim() || !newTaskForm.projectId || isCreatingTask) {
             return
         }
 
-        const createdTask = await addTask({
-            ...newTaskForm,
-            name: newTaskForm.name.trim(),
-            childGoal: newTaskForm.childGoal.trim(),
-            parentGoal: newTaskForm.parentGoal.trim(),
-            description: newTaskForm.description.trim(),
-        })
+        setIsCreatingTask(true)
+        try {
+            const createdTask = await addTask({
+                ...newTaskForm,
+                name: newTaskForm.name.trim(),
+                childGoal: newTaskForm.childGoal.trim(),
+                parentGoal: newTaskForm.parentGoal.trim(),
+                description: newTaskForm.description.trim(),
+            })
 
-        setIsAddTaskOpen(false)
-        setSelectedTask(createdTask)
+            setIsAddTaskOpen(false)
+            setSelectedTask(createdTask)
+        } finally {
+            setIsCreatingTask(false)
+        }
     }
 
     const handleOpenTask = (task: Task) => {
@@ -435,7 +453,7 @@ export default function MyTaskPage() {
     }
 
     const handleSubmitTaskUpdate = async () => {
-        if (!selectedTask || !taskDraft) {
+        if (!selectedTask || !taskDraft || isUpdatingTask) {
             return
         }
 
@@ -458,38 +476,43 @@ export default function MyTaskPage() {
             statusColor: normalizedStatusColor,
         }
 
-        const updatedTask = await updateTask(
-            selectedTask.id,
-            {
-                assigneeId: normalizedTask.assigneeId,
-                name: normalizedTask.name,
-                executionPeriod: normalizedTask.executionPeriod,
-                audience: normalizedTask.audience,
-                weight: normalizedTask.weight,
-                resultMethod: normalizedTask.resultMethod,
-                target: normalizedTask.target,
-                progress: normalizedTask.progress,
-                childGoal: normalizedTask.childGoal,
-                parentGoal: normalizedTask.parentGoal,
-                description: normalizedTask.description,
-                kpis: normalizedTask.kpis,
-                attachments: normalizedTask.attachments,
-                status: normalizedTask.status,
-                statusColor: normalizedTask.statusColor,
-            },
-            selectedTask.projectId,
-        )
+        setIsUpdatingTask(true)
+        try {
+            const updatedTask = await updateTask(
+                selectedTask.id,
+                {
+                    assigneeId: normalizedTask.assigneeId,
+                    name: normalizedTask.name,
+                    executionPeriod: normalizedTask.executionPeriod,
+                    audience: normalizedTask.audience,
+                    weight: normalizedTask.weight,
+                    resultMethod: normalizedTask.resultMethod,
+                    target: normalizedTask.target,
+                    progress: normalizedTask.progress,
+                    childGoal: normalizedTask.childGoal,
+                    parentGoal: normalizedTask.parentGoal,
+                    description: normalizedTask.description,
+                    kpis: normalizedTask.kpis,
+                    attachments: normalizedTask.attachments,
+                    status: normalizedTask.status,
+                    statusColor: normalizedTask.statusColor,
+                },
+                selectedTask.projectId,
+            )
 
-        if (!updatedTask) {
-            return
+            if (!updatedTask) {
+                return
+            }
+
+            setSelectedTask(updatedTask)
+            setTaskDraft(updatedTask)
+            toast({
+                title: "Cập nhật thành công",
+                description: "Nội dung task đã được cập nhật và đang chờ phản hồi từ leader.",
+            })
+        } finally {
+            setIsUpdatingTask(false)
         }
-
-        setSelectedTask(updatedTask)
-        setTaskDraft(updatedTask)
-        toast({
-            title: "Cập nhật thành công",
-            description: "Nội dung task đã được cập nhật và đang chờ phản hồi từ leader.",
-        })
     }
 
     const handleAddSharedMember = (personId: string) => {
@@ -996,10 +1019,12 @@ export default function MyTaskPage() {
                                 </div>
                             </div>
                             <div className="flex justify-end gap-2">
-                                <Button variant="outline" onClick={() => setIsAddTaskOpen(false)}>
+                                <Button variant="outline" onClick={() => setIsAddTaskOpen(false)} disabled={isCreatingTask}>
                                     Cancel
                                 </Button>
-                                <Button onClick={handleSubmitTask}>Create Task</Button>
+                                <Button onClick={handleSubmitTask} loading={isCreatingTask}>
+                                    {isCreatingTask ? "Creating..." : "Create Task"}
+                                </Button>
                             </div>
                         </DialogContent>
                     </Dialog>
@@ -1105,7 +1130,7 @@ export default function MyTaskPage() {
 
                                 {/* Task Rows */}
                                 {currentTasks.map((task) => {
-                                    const assignee = people.find((p) => p.id === task.assigneeId) || people[0]
+                                    const assignee = people.find((p) => p.id === task.assigneeId) ?? unknownPerson
                                     return (
                                         <div
                                             key={task.id}
@@ -1267,7 +1292,7 @@ export default function MyTaskPage() {
                                                 <DropdownMenuTrigger asChild>
                                                     <div className="flex -space-x-1 cursor-pointer">
                                                         {item.attendeeIds.map((attendeeId) => {
-                                                            const attendee = people.find((p) => p.id === attendeeId) || people[0]
+                                                            const attendee = people.find((p) => p.id === attendeeId) ?? unknownPerson
                                                             return (
                                                                 <Avatar key={attendeeId} className="w-5 h-5 border border-white dark:border-gray-800">
                                                                     <AvatarImage src={attendee.imageURL || "/placeholder.svg"} />
@@ -1382,7 +1407,7 @@ export default function MyTaskPage() {
                         </div>
 
                         {teamTasks.map((task) => {
-                            const assignee = people.find((p) => p.id === task.assigneeId) || people[0]
+                            const assignee = people.find((p) => p.id === task.assigneeId) ?? unknownPerson
                             return (
                                 <div
                                     key={task.id}
@@ -1692,10 +1717,13 @@ export default function MyTaskPage() {
                                             setSelectedTask(null)
                                             setTaskDraft(null)
                                         }}
+                                        disabled={isUpdatingTask}
                                     >
                                         Cancel
                                     </Button>
-                                    <Button onClick={handleSubmitTaskUpdate}>Update Task</Button>
+                                    <Button onClick={handleSubmitTaskUpdate} loading={isUpdatingTask}>
+                                        {isUpdatingTask ? "Updating..." : "Update Task"}
+                                    </Button>
                                 </div>
                             </div>
                         </>

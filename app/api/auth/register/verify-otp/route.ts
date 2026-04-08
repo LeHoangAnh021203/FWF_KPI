@@ -6,8 +6,12 @@ export async function POST(request: Request) {
   const body = await request.json();
   const result = await verifyRegistrationOtp(body.email ?? "", body.otp ?? "");
 
-  if (!result.ok || !result.user) {
+  if (!result.ok) {
     return NextResponse.json(result, { status: 400 });
+  }
+
+  if (!result.user) {
+    return NextResponse.json(result);
   }
 
   const response = NextResponse.json({ ok: true, user: { ...result.user, password: "" } });

@@ -3,7 +3,7 @@
 import type React from "react"
 import type { Route } from "next"
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { Button } from "./ui/button"
 import { Input } from "@/components/ui/input"
@@ -20,6 +20,7 @@ import { useAuth } from "@/components/auth-provider"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { useDirectory } from "@/components/directory-provider"
 import { useWorkspace } from "@/components/workspace-context"
+import { isAdminLikeRole } from "@/lib/auth"
 import { findPersonForAuthUser, getTeamById } from "@/lib/people"
 import {
     Plus,
@@ -57,6 +58,15 @@ type ProfileFormState = {
     timezone: string
 }
 
+type ApprovalRequest = {
+    id: string
+    email: string
+    name: string
+    role: "admin" | "ceo" | "leader" | "employee"
+    department: string
+    createdAt: string
+}
+
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
     const router = useRouter()
     const pathname = usePathname()
@@ -68,9 +78,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const [newProjectColor, setNewProjectColor] = useState("bg-blue-200")
     const [newProjectMemberIds, setNewProjectMemberIds] = useState<string[]>([])
     const [isProjectDialogOpen, setIsProjectDialogOpen] = useState(false)
+    const [isProjectSubmitting, setIsProjectSubmitting] = useState(false)
     const [isProfileDialogOpen, setIsProfileDialogOpen] = useState(false)
     const [isProfileSubmitting, setIsProfileSubmitting] = useState(false)
+    const [approvalRequests, setApprovalRequests] = useState<ApprovalRequest[]>([])
+    const [approvalActionKey, setApprovalActionKey] = useState<string | null>(null)
+    const [isSigningOut, setIsSigningOut] = useState(false)
     const selectedProjectId = searchParams.get("projectId")
+    const isAdminUser = isAdminLikeRole(user?.role)
     const todayLabel = useMemo(
         () =>
             new Intl.DateTimeFormat("en-GB", {
@@ -151,6 +166,26 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         },
     ]
 
+    const loadApprovalRequests = async () => {
+        if (!isAdminUser) {
+            setApprovalRequests([])
+            return
+        }
+
+        const response = await fetch("/api/admin/approval-requests", {
+            credentials: "include",
+            cache: "no-store",
+        })
+
+        if (!response.ok) {
+            setApprovalRequests([])
+            return
+        }
+
+        const payload = (await response.json()) as { ok: boolean; requests?: ApprovalRequest[] }
+        setApprovalRequests(payload.ok ? payload.requests ?? [] : [])
+    }
+
     const currentTeamPeople = useMemo(
         () => people.filter((person) => person.team === currentUser.team),
         [currentUser.team],
@@ -163,22 +198,61 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
     const handleAddProject = async () => {
         if (newProjectName.trim()) {
-            const newProject = await addProject({
-                name: newProjectName.trim(),
-                color: newProjectColor,
-                memberIds: Array.from(new Set([currentUser.id, ...newProjectMemberIds])),
-            })
-            setNewProjectName("")
-            setNewProjectColor("bg-blue-200 dark:bg-blue-800")
-            setNewProjectMemberIds([])
-            setIsProjectDialogOpen(false)
-            router.push(`/?projectId=${newProject.id}`)
+            setIsProjectSubmitting(true)
+            try {
+                const newProject = await addProject({
+                    name: newProjectName.trim(),
+                    color: newProjectColor,
+                    memberIds: Array.from(new Set([currentUser.id, ...newProjectMemberIds])),
+                })
+                setNewProjectName("")
+                setNewProjectColor("bg-blue-200 dark:bg-blue-800")
+                setNewProjectMemberIds([])
+                setIsProjectDialogOpen(false)
+                router.push(`/?projectId=${newProject.id}`)
+            } finally {
+                setIsProjectSubmitting(false)
+            }
         }
     }
 
     const handleSignOut = async () => {
+        setIsSigningOut(true)
         await logout()
         router.replace("/login" as Route)
+    }
+
+    const handleApprovalAction = async (requestId: string, action: "approve" | "reject") => {
+        setApprovalActionKey(`${action}:${requestId}`)
+        try {
+            const response = await fetch("/api/admin/approval-requests", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({ requestId, action }),
+            })
+
+            const payload = (await response.json()) as { ok: boolean; message?: string }
+            if (!response.ok || !payload.ok) {
+                toast({
+                    title: action === "approve" ? "Không thể duyệt tài khoản" : "Không thể từ chối tài khoản",
+                    description: payload.message ?? (action === "approve" ? "Yêu cầu duyệt thất bại." : "Yêu cầu từ chối thất bại."),
+                    variant: "destructive",
+                })
+                return
+            }
+
+            await Promise.all([loadApprovalRequests(), refresh(), refreshSession()])
+            toast({
+                title: action === "approve" ? "Duyệt tài khoản thành công" : "Đã từ chối tài khoản",
+                description:
+                    action === "approve"
+                        ? "Tài khoản đã được kích hoạt và email thông báo đã được xử lý."
+                        : "Yêu cầu đã được từ chối và email thông báo đã được xử lý.",
+            })
+        } finally {
+            setApprovalActionKey(null)
+        }
     }
 
     const openProfileDialog = () => {
@@ -247,6 +321,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             setIsProfileSubmitting(false)
         }
     }
+
+    useEffect(() => {
+        void loadApprovalRequests()
+    }, [isAdminUser, user?.id])
 
     return (
         <div className="flex h-screen bg-gray-50 dark:bg-gray-900">
@@ -374,7 +452,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                             <Button variant="outline" onClick={() => setIsProjectDialogOpen(false)}>
                                                 Cancel
                                             </Button>
-                                            <Button onClick={handleAddProject}>Create Team</Button>
+                                            <Button onClick={handleAddProject} loading={isProjectSubmitting}>
+                                                {isProjectSubmitting ? "Creating..." : "Create Team"}
+                                            </Button>
                                         </div>
                                     </div>
                                 </DialogContent>
@@ -468,7 +548,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                 <PopoverTrigger asChild>
                                     <Button variant="ghost" size="icon" className="relative">
                                         <Bell className="w-4 h-4" />
-                                        <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full"></span>
+                                        {(approvalRequests.length > 0 || notifications.some((item) => item.unread)) && (
+                                            <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full"></span>
+                                        )}
                                     </Button>
                                 </PopoverTrigger>
                                 <PopoverContent
@@ -484,6 +566,39 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                         </div>
                                         <Separator className="bg-gray-200 dark:bg-gray-700" />
                                         <div className="space-y-3 max-h-80 overflow-y-auto">
+                                            {approvalRequests.map((request) => (
+                                                <div
+                                                    key={request.id}
+                                                    className="rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-700/50 dark:bg-amber-900/20"
+                                                >
+                                                    <p className="text-sm font-medium text-gray-900 dark:text-white">
+                                                        Yêu cầu duyệt {request.role.toUpperCase()}
+                                                    </p>
+                                                    <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                                                        {request.name} · {request.email}
+                                                    </p>
+                                                    <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                                                        {request.department}
+                                                    </p>
+                                                    <div className="mt-3 flex gap-2">
+                                                        <Button
+                                                            size="sm"
+                                                            loading={approvalActionKey === `approve:${request.id}`}
+                                                            onClick={() => void handleApprovalAction(request.id, "approve")}
+                                                        >
+                                                            Duyệt
+                                                        </Button>
+                                                        <Button
+                                                            size="sm"
+                                                            variant="outline"
+                                                            loading={approvalActionKey === `reject:${request.id}`}
+                                                            onClick={() => void handleApprovalAction(request.id, "reject")}
+                                                        >
+                                                            Từ chối
+                                                        </Button>
+                                                    </div>
+                                                </div>
+                                            ))}
                                             {notifications.map((notification) => (
                                                 <div
                                                     key={notification.id}
@@ -565,6 +680,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                         <Separator className="bg-gray-200 dark:bg-gray-700" />
                                         <Button
                                             variant="ghost"
+                                            loading={isSigningOut}
                                             className="w-full justify-start text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20"
                                             onClick={handleSignOut}
                                         >
@@ -634,7 +750,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                         <Button variant="outline" onClick={() => setIsProfileDialogOpen(false)} disabled={isProfileSubmitting}>
                             Hủy
                         </Button>
-                        <Button onClick={handleSaveProfile} disabled={isProfileSubmitting}>
+                        <Button onClick={handleSaveProfile} loading={isProfileSubmitting} disabled={isProfileSubmitting}>
                             {isProfileSubmitting ? "Đang lưu..." : "Lưu thay đổi"}
                         </Button>
                     </DialogFooter>

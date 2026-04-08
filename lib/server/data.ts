@@ -3,11 +3,24 @@ import "server-only";
 import { randomBytes, randomInt, scryptSync, timingSafeEqual } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { getMongoDb } from "@/lib/mongodb";
-import { COMPANY_DOMAIN, type Department, type UserAccount, type UserRole } from "@/lib/auth";
+import {
+  COMPANY_DOMAIN,
+  isAdminLikeRole,
+  requiresApprovalRole,
+  type Department,
+  type UserAccount,
+  type UserRole
+} from "@/lib/auth";
 import type { Document } from "@/lib/documents";
 import { personDisplayRoles, teams as companyTeams, type Person } from "@/lib/people";
 import type { Project, Task, TaskAttachment, TaskGroups, TimePeriod } from "@/components/workspace-context";
-import { isOtpEmailConfigured, sendOtpEmail } from "@/lib/server/mailer";
+import {
+  isOtpEmailConfigured,
+  sendOtpEmail,
+  sendRoleApprovalGrantedEmail,
+  sendRoleApprovalRejectedEmail,
+  sendRoleApprovalRequestEmail
+} from "@/lib/server/mailer";
 
 type DbUser = {
   _id: string;
@@ -127,6 +140,22 @@ type PendingRegistration = {
   createdAt: string;
 };
 
+type DbRoleApprovalRequest = {
+  _id?: ObjectId;
+  email: string;
+  name: string;
+  password: string;
+  role: UserRole;
+  department: Department;
+  status: "pending" | "approved" | "rejected";
+  approverUserId?: string;
+  otpVerifiedAt: string;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt?: string;
+  rejectedAt?: string;
+};
+
 type SessionActor = {
   user: UserAccount;
   person: Person;
@@ -164,6 +193,15 @@ export type ChatThreadRecord = {
   lastMessage: string;
   lastMessageAt: string;
   messages: ChatMessageRecord[];
+};
+
+export type RoleApprovalRequestRecord = {
+  id: string;
+  email: string;
+  name: string;
+  role: UserRole;
+  department: Department;
+  createdAt: string;
 };
 
 const supportedTeamIds = companyTeams.map((team) => team.id);
@@ -439,6 +477,91 @@ function mapDbUser(user: DbUser): UserAccount {
   };
 }
 
+function mapRequestedRoleToDisplayRole(role: UserRole) {
+  if (role === "leader") {
+    return "Leader";
+  }
+
+  if (role === "ceo") {
+    return "CEO";
+  }
+
+  if (role === "admin") {
+    return "Admin";
+  }
+
+  return "Nhân viên";
+}
+
+function mapRoleApprovalRequest(request: DbRoleApprovalRequest): RoleApprovalRequestRecord {
+  return {
+    id: String(request._id),
+    email: request.email,
+    name: request.name,
+    role: request.role,
+    department: request.department,
+    createdAt: request.createdAt
+  };
+}
+
+async function getRootApprover(db: Awaited<ReturnType<typeof getMongoDb>>) {
+  const primaryAdmin = await db.collection<DbUser>("users").findOne(
+    { role: "admin", verified: true },
+    { sort: { createdAt: 1, _id: 1 } }
+  );
+
+  if (primaryAdmin) {
+    return primaryAdmin;
+  }
+
+  return db.collection<DbUser>("users").findOne(
+    { role: { $in: ["admin", "ceo", "boss"] }, verified: true },
+    { sort: { createdAt: 1, _id: 1 } }
+  );
+}
+
+async function createApprovedUserFromRequest(
+  db: Awaited<ReturnType<typeof getMongoDb>>,
+  request: Pick<DbRoleApprovalRequest, "name" | "email" | "password" | "role" | "department">
+) {
+  const existingUserCount = await db.collection<DbUser>("users").countDocuments();
+  const nextUserId = `u-generated-${existingUserCount + 1}`;
+  const now = new Date().toISOString();
+  const normalizedEmail = normalizeEmail(request.email);
+  const existingPerson = await db.collection<DbPerson>("people").findOne({ email: normalizedEmail });
+  let personId = existingPerson?._id ?? null;
+
+  if (!existingPerson) {
+    personId = `people_generated_${Date.now()}`;
+    const teamId = mapDepartmentToTeamId(request.department);
+    await db.collection<DbPerson>("people").insertOne({
+      _id: personId,
+      name: request.name,
+      role: mapRequestedRoleToDisplayRole(request.role),
+      email: normalizedEmail,
+      imageURL: "/placeholder.svg",
+      teamId,
+      workingHours: { start: "09:00", end: "17:00", timezone: "UTC+7" }
+    });
+  }
+
+  const newUser: DbUser = {
+    _id: nextUserId,
+    name: request.name,
+    email: normalizedEmail,
+    password: request.password,
+    personId,
+    role: request.role,
+    department: request.department,
+    verified: true,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  await db.collection<DbUser>("users").insertOne(newUser);
+  return newUser;
+}
+
 function normalizeUserRole(role: StoredUserRole): UserRole {
   if (role === "manager") {
     return "leader";
@@ -584,7 +707,7 @@ async function getSessionActor(sessionUserId?: string | null): Promise<SessionAc
   const user = mapDbUser(userDocument);
   const people = peopleDocuments.map(mapDbPerson);
   const person = findPersonForUser(user, people);
-  const isAdmin = user.role === "admin";
+  const isAdmin = isAdminLikeRole(user.role);
 
   if (!person && !isAdmin) {
     return null;
@@ -646,6 +769,14 @@ export async function validateLogin(email: string, password: string) {
 
   const user = await db.collection<DbUser>("users").findOne({ email: normalizedEmail });
   if (!user) {
+    const pendingApproval = await db.collection<DbRoleApprovalRequest>("role_approval_requests").findOne({
+      email: normalizedEmail,
+      status: "pending"
+    });
+    if (pendingApproval) {
+      return { ok: false, message: "Tài khoản đã xác thực OTP và đang chờ admin gốc duyệt." };
+    }
+
     return { ok: false, message: "Sai email hoặc mật khẩu." };
   }
 
@@ -692,6 +823,14 @@ export async function createRegistrationOtp(input: {
   const existingUser = await db.collection<DbUser>("users").findOne({ email: normalizedEmail });
   if (existingUser) {
     return { ok: false, message: "Email này đã tồn tại." };
+  }
+
+  const existingApprovalRequest = await db.collection<DbRoleApprovalRequest>("role_approval_requests").findOne({
+    email: normalizedEmail,
+    status: "pending"
+  });
+  if (existingApprovalRequest) {
+    return { ok: false, message: "Tài khoản này đang chờ admin gốc duyệt." };
   }
 
   const otp = `${randomInt(100000, 1000000)}`;
@@ -754,47 +893,53 @@ export async function verifyRegistrationOtp(email: string, otp: string) {
     return { ok: false, message: "OTP không chính xác." };
   }
 
-  const existingUserCount = await db.collection<DbUser>("users").countDocuments();
-  const nextUserId = `u-generated-${existingUserCount + 1}`;
   const now = new Date().toISOString();
 
-  const existingPerson = await db.collection<DbPerson>("people").findOne({ email: normalizedEmail });
-  let personId = existingPerson?._id ?? null;
-
-  if (!existingPerson) {
-    personId = `people_generated_${Date.now()}`;
-    await db.collection<DbPerson>("people").insertOne({
-      _id: personId,
-      name: pending.name,
-      role:
-        pending.role === "leader"
-          ? "Leader"
-          : pending.role === "ceo"
-            ? "CEO"
-            : pending.role === "admin"
-              ? "Admin"
-              : "Nhân viên",
+  if (requiresApprovalRole(pending.role)) {
+    const rootApprover = await getRootApprover(db);
+    const approvalPayload: DbRoleApprovalRequest = {
       email: normalizedEmail,
-      imageURL: "/placeholder.svg",
-      teamId: mapDepartmentToTeamId(pending.department),
-      workingHours: { start: "09:00", end: "17:00", timezone: "UTC+7" }
-    });
+      name: pending.name,
+      password: pending.password,
+      role: pending.role,
+      department: pending.department,
+      status: "pending",
+      approverUserId: rootApprover?._id,
+      otpVerifiedAt: now,
+      createdAt: now,
+      updatedAt: now
+    };
+
+    await db.collection<DbRoleApprovalRequest>("role_approval_requests").updateOne(
+      { email: normalizedEmail, status: "pending" },
+      { $set: approvalPayload },
+      { upsert: true }
+    );
+
+    await db.collection<PendingRegistration>("pending_registrations").deleteOne({ email: normalizedEmail });
+
+    if (rootApprover && isOtpEmailConfigured()) {
+      try {
+        await sendRoleApprovalRequestEmail({
+          to: rootApprover.email,
+          requesterName: pending.name,
+          requesterEmail: normalizedEmail,
+          role: pending.role.toUpperCase(),
+          department: pending.department
+        });
+      } catch {
+        // Keep the approval request even if notification email fails.
+      }
+    }
+
+    return {
+      ok: true,
+      requiresApproval: true,
+      message: "OTP hợp lệ. Tài khoản đang chờ admin gốc duyệt. Bạn sẽ nhận email khi được phê duyệt."
+    };
   }
 
-  const newUser: DbUser = {
-    _id: nextUserId,
-    name: pending.name,
-    email: normalizedEmail,
-    password: pending.password,
-    personId,
-    role: pending.role,
-    department: pending.department,
-    verified: true,
-    createdAt: now,
-    updatedAt: now
-  };
-
-  await db.collection<DbUser>("users").insertOne(newUser);
+  const newUser = await createApprovedUserFromRequest(db, pending);
   await db.collection<PendingRegistration>("pending_registrations").deleteOne({ email: normalizedEmail });
 
   return { ok: true, user: mapDbUser(newUser) };
@@ -1033,6 +1178,122 @@ export async function updateOwnProfile(
 
   const updatedPerson = await db.collection<DbPerson>("people").findOne({ _id: actor.person.id });
   return updatedPerson ? mapDbPerson(updatedPerson) : null;
+}
+
+export async function getPendingRoleApprovalRequests(sessionUserId: string | null | undefined) {
+  const db = await getMongoDb();
+  const rootApprover = await getRootApprover(db);
+  if (!rootApprover || rootApprover._id !== sessionUserId) {
+    throw new Error("Forbidden");
+  }
+
+  const requests = await db.collection<DbRoleApprovalRequest>("role_approval_requests").find(
+    { status: "pending" },
+    { sort: { createdAt: -1 } }
+  ).toArray();
+
+  return requests.map(mapRoleApprovalRequest);
+}
+
+export async function approveRoleApprovalRequest(sessionUserId: string | null | undefined, requestId: string) {
+  const db = await getMongoDb();
+  const rootApprover = await getRootApprover(db);
+  if (!rootApprover || rootApprover._id !== sessionUserId) {
+    throw new Error("Forbidden");
+  }
+
+  const approvalRequest = await db.collection<DbRoleApprovalRequest>("role_approval_requests").findOne({
+    _id: new ObjectId(requestId),
+    status: "pending"
+  });
+
+  if (!approvalRequest) {
+    throw new Error("Approval request not found.");
+  }
+
+  const existingUser = await db.collection<DbUser>("users").findOne({ email: approvalRequest.email });
+  if (existingUser) {
+    throw new Error("Email này đã tồn tại.");
+  }
+
+  const newUser = await createApprovedUserFromRequest(db, approvalRequest);
+  const now = new Date().toISOString();
+
+  await db.collection<DbRoleApprovalRequest>("role_approval_requests").updateOne(
+    { _id: approvalRequest._id },
+    {
+      $set: {
+        status: "approved",
+        updatedAt: now,
+        approvedAt: now,
+        approverUserId: sessionUserId ?? approvalRequest.approverUserId
+      }
+    }
+  );
+
+  if (isOtpEmailConfigured()) {
+    try {
+      await sendRoleApprovalGrantedEmail({
+        to: approvalRequest.email,
+        name: approvalRequest.name,
+        role: approvalRequest.role.toUpperCase()
+      });
+    } catch {
+      // Approval is already complete even if the email cannot be sent.
+    }
+  }
+
+  return mapDbUser(newUser);
+}
+
+export async function rejectRoleApprovalRequest(sessionUserId: string | null | undefined, requestId: string) {
+  const db = await getMongoDb();
+  const rootApprover = await getRootApprover(db);
+  if (!rootApprover || rootApprover._id !== sessionUserId) {
+    throw new Error("Forbidden");
+  }
+
+  const approvalRequest = await db.collection<DbRoleApprovalRequest>("role_approval_requests").findOne({
+    _id: new ObjectId(requestId),
+    status: "pending"
+  });
+
+  if (!approvalRequest) {
+    throw new Error("Approval request not found.");
+  }
+
+  const now = new Date().toISOString();
+  await db.collection<DbRoleApprovalRequest>("role_approval_requests").updateOne(
+    { _id: approvalRequest._id },
+    {
+      $set: {
+        status: "rejected",
+        updatedAt: now,
+        rejectedAt: now,
+        approverUserId: sessionUserId ?? approvalRequest.approverUserId
+      }
+    }
+  );
+
+  if (isOtpEmailConfigured()) {
+    try {
+      await sendRoleApprovalRejectedEmail({
+        to: approvalRequest.email,
+        name: approvalRequest.name,
+        role: approvalRequest.role.toUpperCase()
+      });
+    } catch {
+      // Rejection should persist even if the email fails.
+    }
+  }
+
+  return mapRoleApprovalRequest({
+    ...approvalRequest,
+    status: "rejected",
+    updatedAt: now,
+    rejectedAt: now,
+    approverUserId: sessionUserId ?? approvalRequest.approverUserId
+  });
 }
 
 export async function deletePersonRecord(

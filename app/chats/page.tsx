@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
+import { isAdminLikeRole } from "@/lib/auth"
 import { findPersonForAuthUser, isPersonWorking } from "@/lib/people"
 import {
     Search,
@@ -46,6 +47,18 @@ interface Chat {
     isOnline?: boolean
 }
 
+type ChatListItem = {
+    id: string
+    teammateId: string
+    name: string
+    lastMessage: string
+    lastMessageTime: string
+    unreadCount: number
+    avatar?: string
+    isOnline?: boolean
+    threadId?: string
+}
+
 function getUnreadCount(messages: Message[], currentUserId: string) {
     return messages.filter((message) => message.senderId !== currentUserId && message.status !== "read").length
 }
@@ -68,6 +81,10 @@ export default function ChatsPage() {
     const [selectedChatId, setSelectedChatId] = useState<string>("")
     const [searchQuery, setSearchQuery] = useState("")
     const [newMessage, setNewMessage] = useState("")
+    const [isSelectingChatId, setIsSelectingChatId] = useState<string | null>(null)
+    const [isSendingMessage, setIsSendingMessage] = useState(false)
+    const [deletingMessageId, setDeletingMessageId] = useState<string | null>(null)
+    const isAdmin = isAdminLikeRole(user?.role)
 
     const loadChats = async () => {
         const response = await fetch("/api/chats", {
@@ -122,14 +139,63 @@ export default function ChatsPage() {
         })
     }, [currentUser?.id, people])
 
+    const availableContacts = useMemo(
+        () =>
+            people.filter((person) => {
+                if (person.id === currentUser.id) {
+                    return false
+                }
+
+                return isAdmin ? true : person.team === currentUser.team
+            }),
+        [currentUser.id, currentUser.team, isAdmin, people],
+    )
+
+    const chatListItems = useMemo(() => {
+        const existingTeammateIds = new Set<string>()
+        const threadItems: ChatListItem[] = chats.map((chat) => {
+            const teammateId = chat.participants.find((participantId) => participantId !== currentUser.id) ?? ""
+            if (teammateId) {
+                existingTeammateIds.add(teammateId)
+            }
+
+            return {
+                id: chat.id,
+                teammateId,
+                name: chat.name,
+                lastMessage: chat.lastMessage,
+                lastMessageTime: chat.lastMessageTime,
+                unreadCount: chat.unreadCount,
+                avatar: chat.avatar,
+                isOnline: chat.isOnline,
+                threadId: chat.id,
+            }
+        })
+
+        const contactItems: ChatListItem[] = availableContacts
+            .filter((person) => !existingTeammateIds.has(person.id))
+            .map((person) => ({
+                id: `contact-${person.id}`,
+                teammateId: person.id,
+                name: person.name,
+                lastMessage: "Bắt đầu cuộc trò chuyện mới",
+                lastMessageTime: "",
+                unreadCount: 0,
+                avatar: person.imageURL,
+                isOnline: isPersonWorking(person),
+            }))
+
+        return [...threadItems, ...contactItems]
+    }, [availableContacts, chats, currentUser.id])
+
     const filteredChats = useMemo(
         () =>
-            chats.filter(
+            chatListItems.filter(
                 (chat) =>
                     chat.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
                     chat.lastMessage.toLowerCase().includes(searchQuery.toLowerCase()),
             ),
-        [chats, searchQuery],
+        [chatListItems, searchQuery],
     )
 
     useEffect(() => {
@@ -165,24 +231,82 @@ export default function ChatsPage() {
     }, [chats, currentUser.id, selectedChatId])
 
     const selectedChat = filteredChats.find((chat) => chat.id === selectedChatId)
+    const selectedThread = chats.find((chat) => chat.id === selectedChatId)
+    const selectedChatMeta =
+        selectedChat ??
+        (selectedThread
+            ? {
+                id: selectedThread.id,
+                teammateId: selectedThread.participants.find((participantId) => participantId !== currentUser.id) ?? "",
+                name: selectedThread.name,
+                lastMessage: selectedThread.lastMessage,
+                lastMessageTime: selectedThread.lastMessageTime,
+                unreadCount: selectedThread.unreadCount,
+                avatar: selectedThread.avatar,
+                isOnline: selectedThread.isOnline,
+                threadId: selectedThread.id,
+            }
+            : null)
 
-    const handleSendMessage = async () => {
-        if (!newMessage.trim() || !selectedChat) {
+    const handleSelectChat = async (chat: ChatListItem) => {
+        if (isSelectingChatId) {
             return
         }
 
-        await fetch("/api/chats", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({
-                threadId: selectedChat.id,
-                content: newMessage.trim(),
-            }),
-        })
+        if (chat.threadId) {
+            setSelectedChatId(chat.threadId)
+            return
+        }
 
-        await loadChats()
-        setNewMessage("")
+        setIsSelectingChatId(chat.id)
+        try {
+            const response = await fetch("/api/chats", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({
+                    teammateId: chat.teammateId,
+                }),
+            })
+
+            if (!response.ok) {
+                return
+            }
+
+            const payload = (await response.json()) as { ok: boolean; threadId?: string }
+            if (!payload.ok || !payload.threadId) {
+                return
+            }
+
+            await loadChats()
+            setSelectedChatId(payload.threadId)
+        } finally {
+            setIsSelectingChatId(null)
+        }
+    }
+
+    const handleSendMessage = async () => {
+        if (!newMessage.trim() || !selectedThread || isSendingMessage) {
+            return
+        }
+
+        setIsSendingMessage(true)
+        try {
+            await fetch("/api/chats", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({
+                    threadId: selectedThread.id,
+                    content: newMessage.trim(),
+                }),
+            })
+
+            await loadChats()
+            setNewMessage("")
+        } finally {
+            setIsSendingMessage(false)
+        }
     }
 
     const getMessageStatus = (status: Message["status"]) => {
@@ -199,35 +323,42 @@ export default function ChatsPage() {
     }
 
     const handleDeleteMessage = async (messageId: string) => {
-        if (!selectedChat) {
+        if (!selectedChat || deletingMessageId) {
             return
         }
 
-        const response = await fetch("/api/chats", {
-            method: "DELETE",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({
-                threadId: selectedChat.id,
-                messageId,
-            }),
-        })
+        setDeletingMessageId(messageId)
+        try {
+            const response = await fetch("/api/chats", {
+                method: "DELETE",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({
+                    threadId: selectedChat.id,
+                    messageId,
+                }),
+            })
 
-        if (!response.ok) {
-            return
+            if (!response.ok) {
+                return
+            }
+
+            await loadChats()
+        } finally {
+            setDeletingMessageId(null)
         }
-
-        await loadChats()
     }
 
     return (
         <div className="flex h-[calc(100vh-120px)]">
             <div className="flex w-80 flex-col border-r border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800">
                 <div className="border-b border-gray-200 p-4 dark:border-gray-700">
-                    <h1 className="mb-2 text-xl font-bold text-gray-900 dark:text-white">Chats</h1>
-                    <p className="mb-4 text-sm text-gray-500 dark:text-gray-400">
-                        Chỉ hiển thị thành viên cùng team {teams.find((team) => team.id === currentUser.team)?.name ?? "Marketing"}.
-                    </p>
+                        <h1 className="mb-2 text-xl font-bold text-gray-900 dark:text-white">Chats</h1>
+                        <p className="mb-4 text-sm text-gray-500 dark:text-gray-400">
+                            {isAdmin
+                                ? "Admin có thể chat với tất cả nhân sự trong database."
+                                : `Chỉ hiển thị thành viên cùng team ${teams.find((team) => team.id === currentUser.team)?.name ?? "Marketing"}.`}
+                        </p>
                     <div className="relative">
                         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 transform text-gray-400 dark:text-gray-500" />
                         <Input
@@ -243,8 +374,9 @@ export default function ChatsPage() {
                     {filteredChats.map((chat) => (
                         <div
                             key={chat.id}
-                            onClick={() => setSelectedChatId(chat.id)}
-                            className={`cursor-pointer border-b border-gray-100 p-4 transition-colors dark:border-gray-700 ${selectedChatId === chat.id ? "border-r-2 border-r-blue-500 bg-blue-50 dark:bg-blue-900/20" : "hover:bg-gray-50 dark:hover:bg-gray-700"
+                            onClick={() => void handleSelectChat(chat)}
+                            className={`border-b border-gray-100 p-4 transition-colors dark:border-gray-700 ${isSelectingChatId ? "cursor-wait" : "cursor-pointer"} ${selectedChatId === chat.id ? "border-r-2 border-r-blue-500 bg-blue-50 dark:bg-blue-900/20" : "hover:bg-gray-50 dark:hover:bg-gray-700"
+                                } ${isSelectingChatId && isSelectingChatId !== chat.id ? "pointer-events-none opacity-60" : ""
                                 }`}
                         >
                             <div className="flex items-start space-x-3">
@@ -266,7 +398,9 @@ export default function ChatsPage() {
                                     <div className="flex items-center justify-between">
                                         <h3 className="truncate text-sm font-semibold text-gray-900 dark:text-white">{chat.name}</h3>
                                         <div className="flex items-center space-x-2">
-                                            <span className="text-xs text-gray-500 dark:text-gray-400">{chat.lastMessageTime}</span>
+                                            {chat.lastMessageTime ? (
+                                                <span className="text-xs text-gray-500 dark:text-gray-400">{chat.lastMessageTime}</span>
+                                            ) : null}
                                             {chat.unreadCount > 0 && (
                                                 <Badge className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-blue-500 px-2 py-1 text-xs text-white">
                                                     {chat.unreadCount}
@@ -274,38 +408,40 @@ export default function ChatsPage() {
                                             )}
                                         </div>
                                     </div>
-                                    <p className="mt-1 truncate text-sm text-gray-600 dark:text-gray-400">{chat.lastMessage}</p>
+                                            <p className="mt-1 truncate text-sm text-gray-600 dark:text-gray-400">
+                                                {isSelectingChatId === chat.id ? "Đang mở cuộc trò chuyện..." : chat.lastMessage}
+                                            </p>
+                                        </div>
+                                    </div>
                                 </div>
-                            </div>
-                        </div>
                     ))}
                 </div>
             </div>
 
             <div className="flex flex-1 flex-col bg-gray-50 dark:bg-gray-900">
-                {selectedChat ? (
+                {selectedThread ? (
                     <>
                         <div className="border-b border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
                             <div className="flex items-center justify-between">
                                 <div className="flex items-center space-x-3">
                                     <div className="relative">
                                         <Avatar className="h-10 w-10">
-                                            <AvatarImage src={selectedChat.avatar || "/placeholder.svg"} />
+                                            <AvatarImage src={selectedChatMeta?.avatar || "/placeholder.svg"} />
                                             <AvatarFallback className="bg-gray-200 text-gray-900 dark:bg-gray-600 dark:text-white">
-                                                {selectedChat.name
+                                                {(selectedChatMeta?.name ?? "Unknown")
                                                     .split(" ")
                                                     .map((n) => n[0])
                                                     .join("")}
                                             </AvatarFallback>
                                         </Avatar>
-                                        {selectedChat.isOnline && (
+                                        {selectedChatMeta?.isOnline && (
                                             <div className="absolute -bottom-1 -right-1 h-3 w-3 rounded-full border-2 border-white bg-green-500 dark:border-gray-800" />
                                         )}
                                     </div>
                                     <div>
-                                        <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{selectedChat.name}</h2>
+                                        <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{selectedChatMeta?.name ?? "Unknown"}</h2>
                                         <p className="text-sm text-gray-500 dark:text-gray-400">
-                                            {selectedChat.isOnline ? "Online" : "Last seen recently"}
+                                            {selectedChatMeta?.isOnline ? "Online" : "Last seen recently"}
                                         </p>
                                     </div>
                                 </div>
@@ -327,7 +463,7 @@ export default function ChatsPage() {
                         </div>
 
                         <div className="flex-1 space-y-4 overflow-y-auto p-4">
-                            {selectedChat.messages.map((message) => {
+                            {selectedThread.messages.map((message) => {
                                 const sender = people.find((p) => p.id === message.senderId)
                                 const isCurrentUser = message.senderId === currentUser.id
                                 const senderName = sender?.name || "Unknown"
@@ -370,6 +506,7 @@ export default function ChatsPage() {
                                                         <Button
                                                             variant="ghost"
                                                             size="icon"
+                                                            loading={deletingMessageId === message.id}
                                                             className="h-7 w-7 shrink-0 text-gray-400 hover:text-red-500"
                                                             onClick={() => void handleDeleteMessage(message.id)}
                                                         >
@@ -398,17 +535,18 @@ export default function ChatsPage() {
                                 </Button>
                                 <div className="relative flex-1">
                                     <Input
-                                        placeholder={`Nhắn cho ${selectedChat.name}...`}
+                                        placeholder={`Nhắn cho ${selectedChatMeta?.name ?? "teammate"}...`}
                                         value={newMessage}
                                         onChange={(e) => setNewMessage(e.target.value)}
-                                        onKeyDown={(e) => e.key === "Enter" && handleSendMessage()}
+                                        onKeyDown={(e) => e.key === "Enter" && void handleSendMessage()}
+                                        disabled={isSendingMessage}
                                         className="bg-gray-100 pr-10 text-gray-900 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
                                     />
                                     <Button variant="ghost" size="icon" className="absolute right-1 top-1/2 -translate-y-1/2 transform">
                                         <Smile className="w-4 h-4" />
                                     </Button>
                                 </div>
-                                <Button onClick={handleSendMessage} disabled={!newMessage.trim()}>
+                                <Button onClick={handleSendMessage} disabled={!newMessage.trim() || isSendingMessage} loading={isSendingMessage}>
                                     <Send className="w-4 h-4" />
                                 </Button>
                             </div>
@@ -420,9 +558,15 @@ export default function ChatsPage() {
                             <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-gray-200 dark:bg-gray-700">
                                 <Users className="h-8 w-8 text-gray-400 dark:text-gray-500" />
                             </div>
-                            <h3 className="mb-2 text-lg font-medium text-gray-900 dark:text-white">No team conversations</h3>
+                            <h3 className="mb-2 text-lg font-medium text-gray-900 dark:text-white">
+                                {filteredChats.length > 0 ? "Chọn một cuộc trò chuyện" : "Chưa có cuộc trò chuyện nào"}
+                            </h3>
                             <p className="text-gray-600 dark:text-gray-400">
-                                Tài khoản này chưa có teammate nào trong cùng team để bắt đầu chat.
+                                {filteredChats.length > 0
+                                    ? "Chọn một người ở danh sách bên trái để bắt đầu nhắn tin."
+                                    : isAdmin
+                                        ? "Admin có thể chat với tất cả nhân sự khi có dữ liệu người dùng trong hệ thống."
+                                        : "Tài khoản này chưa có teammate nào trong cùng team để bắt đầu chat."}
                             </p>
                         </div>
                     </div>

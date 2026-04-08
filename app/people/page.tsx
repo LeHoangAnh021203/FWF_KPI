@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { toast } from "@/components/ui/use-toast"
+import { isAdminLikeRole } from "@/lib/auth"
 import { findPersonForAuthUser, getTeamById, isPersonWorking, personDisplayRoles, type Person } from "@/lib/people"
 import {
     ChevronDown,
@@ -70,7 +71,7 @@ export default function PeoplePage() {
     const [editingPerson, setEditingPerson] = useState<Person | null>(null)
     const [personForm, setPersonForm] = useState<PersonFormState>(DEFAULT_FORM)
     const [isSubmitting, setIsSubmitting] = useState(false)
-    const isAdmin = user?.role === "admin"
+    const isAdmin = isAdminLikeRole(user?.role)
     const currentUser = findPersonForAuthUser(user, people)
     const currentTeamId = currentUser?.team ?? ""
     const accessiblePeople = isAdmin

@@ -17,6 +17,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useWorkspace, type TimePeriod } from "@/components/workspace-context"
+import { isAdminLikeRole } from "@/lib/auth"
 import { findPersonForAuthUser, getTeamById } from "@/lib/people"
 
 type ViewMode = "employee" | "project"
@@ -108,29 +109,30 @@ export default function DashboardPage() {
     const [selectedEntityId, setSelectedEntityId] = useState<string>("all")
     const [selectedPeriod, setSelectedPeriod] = useState<PeriodFilter>("all")
     const [searchQuery, setSearchQuery] = useState("")
+    const isAdminUser = isAdminLikeRole(user?.role)
     const currentUser =
         findPersonForAuthUser(user, people) ??
         people.find((person) => person.id === currentUserId) ?? {
             id: user?.id ?? "guest-user",
             name: user?.name ?? "Guest User",
-            role: user?.role === "admin" ? "Admin" : "Member",
+            role: isAdminUser ? "Admin" : "Member",
             email: user?.email ?? "",
             imageURL: "/placeholder.svg",
             workingHours: { start: "09:00", end: "17:00", timezone: "UTC" },
-            team: user?.role === "admin" ? "all" : "product",
+            team: isAdminUser ? "all" : "product",
         }
     const canViewAllData =
-        user?.role === "admin" ||
+        isAdminUser ||
         user?.role === "leader" ||
         currentUser.role.toLowerCase() === "leader"
     const accessibleMemberIds = useMemo(
         () =>
             canViewAllData
-                ? user?.role === "admin"
+                ? isAdminUser
                     ? people.map((person) => person.id)
                     : people.filter((person) => person.team === currentUser.team).map((person) => person.id)
                 : [currentUserId],
-        [canViewAllData, currentUser.team, currentUserId, people, user?.role],
+        [canViewAllData, currentUser.team, currentUserId, isAdminUser, people],
     )
     const scopedProjects = useMemo(() => {
         const projectIds = new Set(

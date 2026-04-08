@@ -69,8 +69,11 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [resendCountdown, setResendCountdown] = useState(30);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const maskedEmail = useMemo(() => maskEmail(email), [email]);
+  const isCeoRole = role === "ceo";
+  const effectiveDepartment: Department = isCeoRole ? "Vận hành" : department;
 
   useEffect(() => {
     if (mode !== "register" || registerStep !== "otp" || resendCountdown <= 0) {
@@ -87,17 +90,19 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
   async function handleResendOtp() {
     setError("");
     setSuccess("");
+    setIsSubmitting(true);
 
     const result = await requestRegistrationOtp({
       name,
       email,
       password,
       role,
-      department
+      department: effectiveDepartment
     });
 
     if (!result.ok) {
       setError(result.message ?? "Gửi lại OTP thất bại.");
+      setIsSubmitting(false);
       return;
     }
 
@@ -105,17 +110,23 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
     setOtpPreview(result.otp ?? "");
     setResendCountdown(30);
     setSuccess("Mã OTP mới đã được gửi tới email công ty.");
+    setIsSubmitting(false);
   }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isSubmitting) {
+      return;
+    }
     setError("");
     setSuccess("");
+    setIsSubmitting(true);
 
     if (mode === "login") {
       const result = await login(email, password);
       if (!result.ok) {
         setError(result.message ?? "Đăng nhập thất bại.");
+        setIsSubmitting(false);
         return;
       }
       router.replace("/dashboard" as Route);
@@ -124,11 +135,13 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
 
     if (!name.trim()) {
       setError("Vui lòng nhập họ và tên.");
+      setIsSubmitting(false);
       return;
     }
 
     if (password.trim().length < 6) {
       setError("Mật khẩu cần tối thiểu 6 ký tự.");
+      setIsSubmitting(false);
       return;
     }
 
@@ -138,18 +151,24 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
         email,
         password,
         role,
-        department
+        department: effectiveDepartment
       });
 
       if (!result.ok) {
         setError(result.message ?? "Gửi OTP thất bại.");
+        setIsSubmitting(false);
         return;
       }
 
       setOtpPreview(result.otp ?? "");
       setRegisterStep("otp");
       setResendCountdown(30);
-      setSuccess("OTP đã được gửi tới email công ty. Nhập mã xác nhận để hoàn tất đăng ký.");
+      setSuccess(
+        role === "admin" || role === "ceo"
+          ? "OTP đã được gửi tới mail công ty. Sau khi xác thực, tài khoản sẽ chuyển sang trạng thái chờ duyệt. Hệ thống sẽ phản hồi trong thời gian sớm nhất."
+          : "OTP đã được gửi tới email công ty. Nhập mã xác nhận để hoàn tất đăng ký."
+      );
+      setIsSubmitting(false);
       return;
     }
 
@@ -157,6 +176,22 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
 
     if (!result.ok) {
       setError(result.message ?? "Xác minh OTP thất bại.");
+      setIsSubmitting(false);
+      return;
+    }
+
+    if (result.requiresApproval) {
+      setError("");
+      setSuccess(result.message ?? "Tài khoản đang chờ admin gốc duyệt.");
+      setRegisterStep("form");
+      setOtp("");
+      setOtpPreview("");
+      setName("");
+      setEmail("");
+      setPassword("");
+      setRole("employee");
+      setDepartment("IT");
+      setIsSubmitting(false);
       return;
     }
 
@@ -245,20 +280,22 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
 
           {mode === "register" && registerStep === "form" ? (
             <>
-              <label className="grid gap-2">
-                <span className="text-sm font-medium text-text">Phòng ban</span>
-                <select
-                  value={department}
-                  onChange={(event) => setDepartment(event.target.value as Department)}
-                  className="rounded-2xl border border-[rgba(55,45,33,0.12)] bg-white/75 px-4 py-3 outline-none transition focus:border-ink"
-                >
-                  {departments.map((item) => (
-                    <option key={item} value={item}>
-                      {item}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {!isCeoRole ? (
+                <label className="grid gap-2">
+                  <span className="text-sm font-medium text-text">Phòng ban</span>
+                  <select
+                    value={department}
+                    onChange={(event) => setDepartment(event.target.value as Department)}
+                    className="rounded-2xl border border-[rgba(55,45,33,0.12)] bg-white/75 px-4 py-3 outline-none transition focus:border-ink"
+                  >
+                    {departments.map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
 
               <label className="grid gap-2">
                 <span className="text-sm font-medium text-text">Vai trò</span>
@@ -344,13 +381,20 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
 
           <button
             type="submit"
+            disabled={isSubmitting}
             className={`px-5 py-3 font-medium text-white ${
               mode === "register" && registerStep === "otp"
                 ? "rounded-2xl bg-[linear-gradient(180deg,#95afff,#84a0f5)] text-[15px] shadow-[0_18px_40px_rgba(120,146,220,0.22)]"
                 : "rounded-full bg-[linear-gradient(135deg,#2a3142,#dd6b4d)]"
-            }`}
+            } ${isSubmitting ? "cursor-not-allowed opacity-70" : ""}`}
           >
-            {mode === "login" ? "Đăng nhập" : registerStep === "form" ? "Gửi OTP" : "Verify Code"}
+            {isSubmitting
+              ? "Đang xử lý..."
+              : mode === "login"
+                ? "Đăng nhập"
+                : registerStep === "form"
+                  ? "Gửi OTP"
+                  : "Verify Code"}
           </button>
         </form>
 
@@ -360,7 +404,7 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
             <button
               type="button"
               onClick={handleResendOtp}
-              disabled={resendCountdown > 0}
+              disabled={resendCountdown > 0 || isSubmitting}
               className="font-semibold text-[#3b6af5] disabled:cursor-not-allowed disabled:text-[#9aa7c7]"
             >
               {resendCountdown > 0 ? `Resend Code in ${resendCountdown}s` : "Resend Code"}

@@ -24,7 +24,7 @@ type AuthContextValue = {
   refreshSession: () => Promise<void>;
   login: (email: string, password: string) => Promise<{ ok: boolean; message?: string }>;
   requestRegistrationOtp: (input: RegisterInput) => Promise<{ ok: boolean; message?: string; otp?: string }>;
-  verifyRegistrationOtp: (email: string, otp: string) => Promise<{ ok: boolean; message?: string }>;
+  verifyRegistrationOtp: (email: string, otp: string) => Promise<{ ok: boolean; message?: string; requiresApproval?: boolean }>;
   logout: () => Promise<void>;
 };
 
@@ -124,9 +124,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           body: JSON.stringify({ email, otp })
         });
 
-        const payload = (await response.json()) as { ok: boolean; message?: string; user?: UserAccount };
-        if (!response.ok || !payload.ok || !payload.user) {
+        const payload = (await response.json()) as {
+          ok: boolean;
+          message?: string;
+          user?: UserAccount;
+          requiresApproval?: boolean;
+        };
+        if (!response.ok || !payload.ok) {
           return { ok: false, message: payload.message ?? "Xác minh OTP thất bại." };
+        }
+
+        if (!payload.user) {
+          setPendingRegistration(null);
+          return { ok: true, message: payload.message, requiresApproval: payload.requiresApproval };
         }
 
         setUser(payload.user);

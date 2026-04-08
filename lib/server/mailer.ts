@@ -80,3 +80,115 @@ export async function sendOtpEmail({
     `
   });
 }
+
+async function sendTransactionalEmail({
+  to,
+  subject,
+  text,
+  html
+}: {
+  to: string;
+  subject: string;
+  text: string;
+  html: string;
+}) {
+  const smtp = getSmtpConfig();
+  const transporter = nodemailer.createTransport({
+    host: smtp.host,
+    port: smtp.port,
+    secure: smtp.secure,
+    auth: {
+      user: smtp.user,
+      pass: smtp.pass
+    }
+  });
+
+  await transporter.sendMail({
+    from: smtp.from,
+    to,
+    subject,
+    text,
+    html
+  });
+}
+
+export async function sendRoleApprovalRequestEmail({
+  to,
+  requesterName,
+  requesterEmail,
+  role,
+  department
+}: {
+  to: string;
+  requesterName: string;
+  requesterEmail: string;
+  role: string;
+  department: string;
+}) {
+  await sendTransactionalEmail({
+    to,
+    subject: "Yêu cầu duyệt quyền Admin/CEO mới",
+    text: `Có yêu cầu đăng ký quyền ${role} mới từ ${requesterName} (${requesterEmail}) thuộc phòng ban ${department}. Vui lòng đăng nhập hệ thống để duyệt.`,
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #111827;">
+        <h2 style="margin-bottom: 12px;">Yêu cầu duyệt quyền Admin/CEO mới</h2>
+        <p>Có một tài khoản vừa hoàn tất OTP và đang chờ bạn duyệt:</p>
+        <ul>
+          <li><strong>Họ tên:</strong> ${requesterName}</li>
+          <li><strong>Email:</strong> ${requesterEmail}</li>
+          <li><strong>Role:</strong> ${role}</li>
+          <li><strong>Phòng ban:</strong> ${department}</li>
+        </ul>
+        <p>Vui lòng đăng nhập hệ thống Face Wash Fox để xác nhận.</p>
+      </div>
+    `
+  });
+}
+
+export async function sendRoleApprovalGrantedEmail({
+  to,
+  name,
+  role
+}: {
+  to: string;
+  name: string;
+  role: string;
+}) {
+  await sendTransactionalEmail({
+    to,
+    subject: "Tài khoản Face Wash Fox đã được duyệt",
+    text: `Xin chào ${name}, tài khoản với quyền ${role} của bạn đã được duyệt. Bạn có thể đăng nhập và sử dụng hệ thống ngay bây giờ.`,
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #111827;">
+        <h2 style="margin-bottom: 12px;">Tài khoản đã được duyệt</h2>
+        <p>Xin chào ${name},</p>
+        <p>Tài khoản với quyền <strong>${role}</strong> của bạn đã được admin xác nhận.</p>
+        <p>Bạn có thể đăng nhập và sử dụng hệ thống Face Wash Fox ngay bây giờ.</p>
+      </div>
+    `
+  });
+}
+
+export async function sendRoleApprovalRejectedEmail({
+  to,
+  name,
+  role
+}: {
+  to: string;
+  name: string;
+  role: string;
+}) {
+  await sendTransactionalEmail({
+    to,
+    subject: "Yêu cầu quyền Face Wash Fox chưa được duyệt",
+    text: `Xin chào ${name}, yêu cầu cấp quyền ${role} của bạn chưa được admin gốc phê duyệt. Nếu cần, hãy liên hệ quản trị hệ thống để biết thêm chi tiết.`,
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #111827;">
+        <h2 style="margin-bottom: 12px;">Yêu cầu chưa được duyệt</h2>
+        <p>Xin chào ${name},</p>
+        <p>Yêu cầu cấp quyền <strong>${role}</strong> của bạn hiện chưa được admin gốc phê duyệt.</p>
+        <p>Nếu cần, hãy liên hệ quản trị hệ thống để được hỗ trợ thêm.</p>
+      </div>
+    `
+  });
+}

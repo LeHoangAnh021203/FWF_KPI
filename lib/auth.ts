@@ -32,6 +32,14 @@ export const departments: Department[] = [
 
 export const registrationRoles: UserRole[] = ["employee", "leader", "ceo", "admin"];
 
+export function isAdminLikeRole(role: UserRole | null | undefined) {
+  return role === "admin" || role === "ceo";
+}
+
+export function requiresApprovalRole(role: UserRole | null | undefined) {
+  return role === "admin" || role === "ceo";
+}
+
 export const seededUsers: UserAccount[] = [
   {
     id: "u-people-0",
