@@ -846,9 +846,10 @@ async function getSessionActor(sessionUserId?: string | null): Promise<SessionAc
 
   const db = await getMongoDb();
   await ensureCompanyDirectorySynced(db);
-  const [userDocument, peopleDocuments] = await Promise.all([
+  const [userDocument, peopleDocuments, userDocuments] = await Promise.all([
     db.collection<DbUser>("users").findOne({ _id: sessionUserId }),
-    db.collection<DbPerson>("people").find({}).toArray()
+    db.collection<DbPerson>("people").find({}).toArray(),
+    db.collection<DbUser>("users").find({}).toArray()
   ]);
 
   if (!userDocument) {
@@ -857,8 +858,17 @@ async function getSessionActor(sessionUserId?: string | null): Promise<SessionAc
 
   const user = mapDbUser(userDocument);
   const people = peopleDocuments.map(mapDbPerson);
+  const usersByEmail = new Map(userDocuments.map((candidate) => [normalizeEmail(candidate.email), mapDbUser(candidate)]));
   const person = findPersonForUser(user, people);
   const isAdmin = isAdminLikeRole(user.role);
+  const adminVisiblePersonIds = new Set(
+    people
+      .filter((candidate) => {
+        const matchedUser = usersByEmail.get(normalizeEmail(candidate.email));
+        return matchedUser ? isAdminLikeRole(matchedUser.role) : false;
+      })
+      .map((candidate) => candidate.id)
+  );
 
   if (!person && !isAdmin) {
     return null;
@@ -877,7 +887,7 @@ async function getSessionActor(sessionUserId?: string | null): Promise<SessionAc
 
   const teamMembers = isAdmin
     ? people
-    : people.filter((candidate) => candidate.team === actorPerson.team);
+    : people.filter((candidate) => candidate.team === actorPerson.team || adminVisiblePersonIds.has(candidate.id));
   const isLeader =
     isAdmin || user.role === "leader" || actorPerson.role.toLowerCase() === "leader";
 

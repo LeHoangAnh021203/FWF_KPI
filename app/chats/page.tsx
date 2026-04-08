@@ -164,7 +164,12 @@ export default function ChatsPage() {
                     return false
                 }
 
-                return isAdmin ? true : person.team === currentUser.team
+                if (isAdmin) {
+                    return true
+                }
+
+                const personRole = person.role.toLowerCase()
+                return person.team === currentUser.team || personRole === "admin" || personRole === "ceo"
             }),
         [currentUser.id, currentUser.team, isAdmin, people],
     )
@@ -375,7 +380,7 @@ export default function ChatsPage() {
                         <p className="mb-4 text-sm text-gray-500 dark:text-gray-400">
                             {isAdmin
                                 ? "Admin có thể chat với tất cả nhân sự trong database."
-                                : `Chỉ hiển thị thành viên cùng team ${teams.find((team) => team.id === currentUser.team)?.name ?? "Marketing"}.`}
+                                : `Hiển thị thành viên cùng team ${teams.find((team) => team.id === currentUser.team)?.name ?? "Marketing"} và các tài khoản admin/CEO.`}
                         </p>
                     <div className="relative">
                         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 transform text-gray-400 dark:text-gray-500" />
