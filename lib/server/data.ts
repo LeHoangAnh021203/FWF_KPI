@@ -1,6 +1,6 @@
 import "server-only";
 
-import { randomBytes, randomInt, scryptSync, timingSafeEqual } from "node:crypto";
+import { randomInt } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { getMongoDb } from "@/lib/mongodb";
 import {
@@ -149,9 +149,16 @@ type PendingRegistration = {
   _id?: ObjectId;
   email: string;
   name: string;
-  password: string;
   role: UserRole;
   department: Department;
+  otp: string;
+  expiresAt: string;
+  createdAt: string;
+};
+
+type PendingLoginOtp = {
+  _id?: ObjectId;
+  email: string;
   otp: string;
   expiresAt: string;
   createdAt: string;
@@ -161,7 +168,6 @@ type DbRoleApprovalRequest = {
   _id?: ObjectId;
   email: string;
   name: string;
-  password: string;
   role: UserRole;
   department: Department;
   status: "pending" | "approved" | "rejected";
@@ -483,31 +489,6 @@ function getStatusColor(status: Task["status"]) {
   return "bg-pink-100 text-pink-800 dark:bg-pink-900 dark:text-pink-300";
 }
 
-function hashPassword(password: string) {
-  const salt = randomBytes(16).toString("hex");
-  const derivedKey = scryptSync(password, salt, 64).toString("hex");
-  return `scrypt$${salt}$${derivedKey}`;
-}
-
-function isHashedPassword(value: string) {
-  return value.startsWith("scrypt$");
-}
-
-function verifyHashedPassword(password: string, hashedPassword: string) {
-  const [, salt, storedKey] = hashedPassword.split("$");
-  if (!salt || !storedKey) {
-    return false;
-  }
-
-  const derivedKey = scryptSync(password, salt, 64);
-  const storedBuffer = Buffer.from(storedKey, "hex");
-
-  return (
-    storedBuffer.length === derivedKey.length &&
-    timingSafeEqual(storedBuffer, derivedKey)
-  );
-}
-
 function mapDepartmentToTeamId(department: Department) {
   switch (department) {
     case "Marketing":
@@ -624,7 +605,7 @@ async function getRootApprover(db: Awaited<ReturnType<typeof getMongoDb>>) {
 
 async function createApprovedUserFromRequest(
   db: Awaited<ReturnType<typeof getMongoDb>>,
-  request: Pick<DbRoleApprovalRequest, "name" | "email" | "password" | "role" | "department">
+  request: Pick<DbRoleApprovalRequest, "name" | "email" | "role" | "department">
 ) {
   const existingUserCount = await db.collection<DbUser>("users").countDocuments();
   const nextUserId = `u-generated-${existingUserCount + 1}`;
@@ -651,7 +632,7 @@ async function createApprovedUserFromRequest(
     _id: nextUserId,
     name: request.name,
     email: normalizedEmail,
-    password: request.password,
+    password: "",
     personId,
     role: request.role,
     department: request.department,
@@ -953,7 +934,7 @@ function canViewSchedule(actor: SessionActor, schedule: DbSchedule) {
   return schedule.attendeeIds.includes(actor.person.id);
 }
 
-export async function validateLogin(email: string, password: string) {
+export async function createLoginOtp(email: string) {
   const db = await getMongoDb();
   const normalizedEmail = normalizeEmail(email);
 
@@ -971,39 +952,54 @@ export async function validateLogin(email: string, password: string) {
       return { ok: false, message: "Tài khoản đã xác thực OTP và đang chờ admin gốc duyệt." };
     }
 
-    return { ok: false, message: "Sai email hoặc mật khẩu." };
-  }
-
-  let isValidPassword = false;
-  if (isHashedPassword(user.password)) {
-    isValidPassword = verifyHashedPassword(password, user.password);
-  } else {
-    isValidPassword = user.password === password;
-    if (isValidPassword) {
-      const nextPassword = hashPassword(password);
-      await db.collection<DbUser>("users").updateOne(
-        { _id: user._id },
-        { $set: { password: nextPassword, updatedAt: new Date().toISOString() } }
-      );
-      user.password = nextPassword;
-    }
-  }
-
-  if (!isValidPassword) {
-    return { ok: false, message: "Sai email hoặc mật khẩu." };
+    return { ok: false, message: "Không tìm thấy tài khoản phù hợp." };
   }
 
   if (!user.verified) {
     return { ok: false, message: "Tài khoản chưa xác minh email bằng OTP." };
   }
 
-  return { ok: true, user: mapDbUser(user) };
+  const otp = `${randomInt(100000, 1000000)}`;
+  const now = new Date();
+  const payload: PendingLoginOtp = {
+    email: normalizedEmail,
+    otp,
+    expiresAt: new Date(now.getTime() + 5 * 60 * 1000).toISOString(),
+    createdAt: now.toISOString()
+  };
+
+  await db.collection<PendingLoginOtp>("pending_login_otps").updateOne(
+    { email: normalizedEmail },
+    { $set: payload },
+    { upsert: true }
+  );
+
+  try {
+    if (!isOtpEmailConfigured()) {
+      if (process.env.OTP_DEBUG === "true") {
+        return { ok: true, message: "OTP đăng nhập đã được tạo ở chế độ debug.", otp };
+      }
+
+      await db.collection<PendingLoginOtp>("pending_login_otps").deleteOne({ email: normalizedEmail });
+      return { ok: false, message: "Chưa cấu hình SMTP để gửi OTP thật." };
+    }
+
+    await sendOtpEmail({
+      email: normalizedEmail,
+      name: user.name.trim(),
+      otp
+    });
+
+    return { ok: true, message: "OTP đăng nhập đã được gửi tới email công ty." };
+  } catch {
+    await db.collection<PendingLoginOtp>("pending_login_otps").deleteOne({ email: normalizedEmail });
+    return { ok: false, message: "Không thể gửi OTP qua email. Vui lòng kiểm tra cấu hình SMTP." };
+  }
 }
 
 export async function createRegistrationOtp(input: {
   name: string;
   email: string;
-  password: string;
   role: UserRole;
   department: Department;
 }) {
@@ -1032,7 +1028,6 @@ export async function createRegistrationOtp(input: {
   const payload: PendingRegistration = {
     email: normalizedEmail,
     name: input.name.trim(),
-    password: hashPassword(input.password),
     role: input.role,
     department: input.department,
     otp,
@@ -1094,7 +1089,6 @@ export async function verifyRegistrationOtp(email: string, otp: string) {
     const approvalPayload: DbRoleApprovalRequest = {
       email: normalizedEmail,
       name: pending.name,
-      password: pending.password,
       role: pending.role,
       department: pending.department,
       status: "pending",
@@ -1137,6 +1131,38 @@ export async function verifyRegistrationOtp(email: string, otp: string) {
   await db.collection<PendingRegistration>("pending_registrations").deleteOne({ email: normalizedEmail });
 
   return { ok: true, user: mapDbUser(newUser) };
+}
+
+export async function verifyLoginOtp(email: string, otp: string) {
+  const db = await getMongoDb();
+  const normalizedEmail = normalizeEmail(email);
+  const pending = await db.collection<PendingLoginOtp>("pending_login_otps").findOne({ email: normalizedEmail });
+
+  if (!pending) {
+    return { ok: false, message: "Không tìm thấy yêu cầu đăng nhập phù hợp." };
+  }
+
+  if (Date.now() > new Date(pending.expiresAt).getTime()) {
+    await db.collection<PendingLoginOtp>("pending_login_otps").deleteOne({ email: normalizedEmail });
+    return { ok: false, message: "OTP đã hết hạn. Vui lòng gửi lại OTP." };
+  }
+
+  if (pending.otp !== otp.trim()) {
+    return { ok: false, message: "OTP không chính xác." };
+  }
+
+  const user = await db.collection<DbUser>("users").findOne({
+    email: normalizedEmail,
+    verified: true
+  });
+
+  await db.collection<PendingLoginOtp>("pending_login_otps").deleteOne({ email: normalizedEmail });
+
+  if (!user) {
+    return { ok: false, message: "Tài khoản không còn khả dụng." };
+  }
+
+  return { ok: true, user: mapDbUser(user) };
 }
 
 export async function getDirectory() {

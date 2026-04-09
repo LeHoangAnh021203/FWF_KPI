@@ -93,14 +93,14 @@ function maskEmail(email: string) {
 
 export function AuthShell({ mode }: { mode: AuthMode }) {
   const router = useRouter();
-  const { login, requestRegistrationOtp, verifyRegistrationOtp, users } = useAuth();
+  const { requestLoginOtp, verifyLoginOtp, requestRegistrationOtp, verifyRegistrationOtp, users } = useAuth();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [department, setDepartment] = useState<Department>("IT");
   const [role, setRole] = useState<UserRole>("employee");
   const [otp, setOtp] = useState("");
   const [otpPreview, setOtpPreview] = useState("");
+  const [loginStep, setLoginStep] = useState<"form" | "otp">("form");
   const [registerStep, setRegisterStep] = useState<"form" | "otp">("form");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -110,9 +110,10 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
   const maskedEmail = useMemo(() => maskEmail(email), [email]);
   const isCeoRole = role === "ceo";
   const effectiveDepartment: Department = isCeoRole ? "Vận hành" : department;
+  const isOtpStep = mode === "login" ? loginStep === "otp" : registerStep === "otp";
 
   useEffect(() => {
-    if (mode !== "register" || registerStep !== "otp" || resendCountdown <= 0) {
+    if (!isOtpStep || resendCountdown <= 0) {
       return;
     }
 
@@ -121,20 +122,22 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
     }, 1000);
 
     return () => window.clearTimeout(timeout);
-  }, [mode, registerStep, resendCountdown]);
+  }, [isOtpStep, resendCountdown]);
 
   async function handleResendOtp() {
     setError("");
     setSuccess("");
     setIsSubmitting(true);
 
-    const result = await requestRegistrationOtp({
-      name,
-      email,
-      password,
-      role,
-      department: effectiveDepartment
-    });
+    const result =
+      mode === "login"
+        ? await requestLoginOtp(email)
+        : await requestRegistrationOtp({
+          name,
+          email,
+          role,
+          department: effectiveDepartment
+        });
 
     if (!result.ok) {
       setError(result.message ?? "Gửi lại OTP thất bại.");
@@ -159,9 +162,26 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
     setIsSubmitting(true);
 
     if (mode === "login") {
-      const result = await login(email, password);
+      if (loginStep === "form") {
+        const result = await requestLoginOtp(email);
+        if (!result.ok) {
+          setError(result.message ?? "Gửi OTP đăng nhập thất bại.");
+          setIsSubmitting(false);
+          return;
+        }
+
+        setOtp("");
+        setOtpPreview(result.otp ?? "");
+        setLoginStep("otp");
+        setResendCountdown(30);
+        setSuccess("OTP đăng nhập đã được gửi tới email công ty.");
+        setIsSubmitting(false);
+        return;
+      }
+
+      const result = await verifyLoginOtp(email, otp);
       if (!result.ok) {
-        setError(result.message ?? "Đăng nhập thất bại.");
+        setError(result.message ?? "Xác minh OTP đăng nhập thất bại.");
         setIsSubmitting(false);
         return;
       }
@@ -175,17 +195,10 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
       return;
     }
 
-    if (password.trim().length < 6) {
-      setError("Mật khẩu cần tối thiểu 6 ký tự.");
-      setIsSubmitting(false);
-      return;
-    }
-
     if (registerStep === "form") {
       const result = await requestRegistrationOtp({
         name,
         email,
-        password,
         role,
         department: effectiveDepartment
       });
@@ -224,7 +237,6 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
       setOtpPreview("");
       setName("");
       setEmail("");
-      setPassword("");
       setRole("employee");
       setDepartment("IT");
       setIsSubmitting(false);
@@ -236,34 +248,22 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
 
   return (
     <div className="grid min-h-screen gap-6 p-4 lg:grid-cols-[1.1fr_0.9fr] lg:p-6">
-      <section className="rounded-[32px] border border-[rgba(55,45,33,0.12)] bg-[linear-gradient(145deg,rgba(42,49,66,0.96),rgba(78,72,60,0.94))] p-8 text-white shadow-float backdrop-blur-xl lg:p-10">
-        <p className="mb-2 text-[11px] uppercase tracking-[0.24em] text-white/70">Face Wash Fox</p>
-        <h1 className="max-w-xl text-4xl font-semibold leading-tight">
-          Task + KPI platform theo phòng ban 
-        </h1>
-        <p className="mt-4 max-w-2xl text-sm leading-7 text-white/76">
-        Dưới đây là quy định và hướng dẫn đăng ký.
-        </p>
+      <section
+        className={`relative overflow-hidden rounded-[32px] bg-cover bg-center bg-no-repeat p-8 text-white shadow-float lg:p-10 ${
+          mode === "login" ? "bg-[url('/cao_kpi.jpg')]" : "bg-[url('/cao_register.jpg')]"
+        }`}
+      >
 
-        <div className="mt-8 grid gap-4 md:grid-cols-2">
-          <div className="rounded-[24px] border border-white/10 bg-white/8 p-5">
-            <p className="text-sm uppercase tracking-[0.18em] text-white/60">Quy định mail</p>
-            <strong className="mt-3 block text-2xl">@facewashfox.com</strong>
-            <p className="mt-2 text-sm leading-7 text-white/70">
-              Chỉ email công ty mới được tạo tài khoản và đăng nhập.
-            </p>
-          </div>
-          <div className="rounded-[24px] border border-white/10 bg-white/8 p-5">
-            <p className="text-sm uppercase tracking-[0.18em] text-white/60">Tài khoản mẫu</p>
-            <ul className="mt-3 space-y-2 text-sm leading-7 text-white/70">
-              {users.slice(0, 1).map((item) => (
-                <li key={item.email}>
-                  {item.email} · {roleLabels[item.role]} · {item.department}
-                </li>
-              ))}
-            </ul>
-            <p className="mt-2 text-xs text-white/50">Mật khẩu mẫu: 123</p>
-          </div>
+        <div className="relative z-10">
+
+
+
+
+          <p className="mt-4 max-w-2xl text-sm leading-7 text-white/76">
+
+          </p>
+
+
         </div>
       </section>
 
@@ -273,16 +273,20 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
         </p>
         <h2 className="text-3xl font-semibold text-text">
           {mode === "login"
-            ? "Đăng nhập tài khoản công ty"
+            ? loginStep === "form"
+              ? "Đăng nhập tài khoản công ty"
+              : "Xác nhận OTP đăng nhập"
             : registerStep === "form"
               ? "Tạo tài khoản theo phòng ban"
               : "Xác nhận email bằng OTP"}
         </h2>
         <p className="mt-3 text-sm leading-7 text-muted">
           {mode === "login"
-            ? "Đăng nhập bằng email nội bộ để nhận giao diện và quyền tương ứng."
+            ? loginStep === "form"
+              ? "Nhập email nội bộ để nhận OTP đăng nhập."
+              : "Nhập mã OTP đã gửi tới email công ty để hoàn tất đăng nhập."
             : registerStep === "form"
-              ? "Đăng ký bằng email công ty, chọn phòng ban và vai trò để demo hệ thống."
+              ? "Đăng ký bằng email công ty, chọn phòng ban và vai trò rồi xác thực bằng OTP."
               : "Tài khoản chỉ được tạo sau khi OTP được xác nhận thành công."}
         </p>
 
@@ -297,16 +301,6 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
           ) : null}
 
           <CompanyEmailField value={email} onChange={setEmail} />
-
-          {mode === "login" || registerStep === "form" ? (
-            <InputField
-              label="Mật khẩu"
-              value={password}
-              onChange={setPassword}
-              placeholder="Nhập mật khẩu"
-              type="password"
-            />
-          ) : null}
 
           {mode === "register" && registerStep === "form" ? (
             <>
@@ -344,7 +338,7 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
             </>
           ) : null}
 
-          {mode === "register" && registerStep === "otp" ? (
+          {isOtpStep ? (
             <>
               <div className="overflow-hidden rounded-[28px] border border-[rgba(123,145,199,0.18)] bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(247,249,255,0.96))] shadow-[0_28px_90px_rgba(120,146,220,0.18)]">
                 <div className="px-8 pb-8 pt-8 text-center">
@@ -412,23 +406,24 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
           <button
             type="submit"
             disabled={isSubmitting}
-            className={`px-5 py-3 font-medium text-white ${
-              mode === "register" && registerStep === "otp"
-                ? "rounded-2xl bg-[linear-gradient(180deg,#95afff,#84a0f5)] text-[15px] shadow-[0_18px_40px_rgba(120,146,220,0.22)]"
-                : "rounded-full bg-[linear-gradient(135deg,#2a3142,#dd6b4d)]"
-            } ${isSubmitting ? "cursor-not-allowed opacity-70" : ""}`}
+            className={`px-5 py-3 font-medium text-white ${isOtpStep
+              ? "rounded-2xl bg-[linear-gradient(180deg,#95afff,#84a0f5)] text-[15px] shadow-[0_18px_40px_rgba(120,146,220,0.22)]"
+              : "rounded-full bg-[linear-gradient(135deg,#2a3142,#dd6b4d)]"
+              } ${isSubmitting ? "cursor-not-allowed opacity-70" : ""}`}
           >
             {isSubmitting
               ? "Đang xử lý..."
               : mode === "login"
-                ? "Đăng nhập"
+                ? loginStep === "form"
+                  ? "Gửi OTP đăng nhập"
+                  : "Xác minh OTP"
                 : registerStep === "form"
                   ? "Gửi OTP"
-                  : "Verify Code"}
+                  : "Xác minh OTP"}
           </button>
         </form>
 
-        {mode === "register" && registerStep === "otp" ? (
+        {isOtpStep ? (
           <div className="mx-[-2rem] mt-6 border-t border-[rgba(123,145,199,0.14)] px-8 pt-8 text-center text-[15px] text-[#7080a0]">
             Didn't receive the code?{" "}
             <button

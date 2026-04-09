@@ -9,15 +9,8 @@ import { type Department, type UserAccount, type UserRole } from "@/lib/auth";
 type RegisterInput = {
   name: string;
   email: string;
-  password: string;
   role: UserRole;
   department: Department;
-};
-
-type PendingRegistration = {
-  input: RegisterInput;
-  otp: string;
-  expiresAt: number;
 };
 
 type AuthContextValue = {
@@ -25,7 +18,8 @@ type AuthContextValue = {
   users: UserAccount[];
   isReady: boolean;
   refreshSession: () => Promise<void>;
-  login: (email: string, password: string) => Promise<{ ok: boolean; message?: string }>;
+  requestLoginOtp: (email: string) => Promise<{ ok: boolean; message?: string; otp?: string }>;
+  verifyLoginOtp: (email: string, otp: string) => Promise<{ ok: boolean; message?: string }>;
   requestRegistrationOtp: (input: RegisterInput) => Promise<{ ok: boolean; message?: string; otp?: string }>;
   verifyRegistrationOtp: (email: string, otp: string) => Promise<{ ok: boolean; message?: string; requiresApproval?: boolean }>;
   logout: () => Promise<void>;
@@ -39,7 +33,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [users, setUsers] = useState<UserAccount[]>([]);
   const [user, setUser] = useState<UserAccount | null>(null);
   const [isReady, setIsReady] = useState(false);
-  const [pendingRegistration, setPendingRegistration] = useState<PendingRegistration | null>(null);
 
   const refreshSession = async () => {
     if (!isAuthPage) {
@@ -108,12 +101,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       users,
       isReady,
       refreshSession,
-      login: async (email, password) => {
+      requestLoginOtp: async (email) => {
         const response = await fetch("/api/auth/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
-          body: JSON.stringify({ email, password })
+          body: JSON.stringify({ email })
+        });
+
+        return (await response.json()) as { ok: boolean; message?: string; otp?: string };
+      },
+      verifyLoginOtp: async (email, otp) => {
+        const response = await fetch("/api/auth/login/verify-otp", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ email, otp })
         });
 
         const payload = (await response.json()) as { ok: boolean; message?: string; user?: UserAccount };
@@ -131,16 +134,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           credentials: "include",
           body: JSON.stringify(input)
         });
-
         const payload = (await response.json()) as { ok: boolean; message?: string; otp?: string };
-        if (payload.ok) {
-          setPendingRegistration({
-            input,
-            otp: payload.otp ?? "",
-            expiresAt: Date.now() + 5 * 60 * 1000
-          });
-        }
-
         return payload;
       },
       verifyRegistrationOtp: async (email, otp) => {
@@ -162,7 +156,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (!payload.user) {
-          setPendingRegistration(null);
           return { ok: true, message: payload.message, requiresApproval: payload.requiresApproval };
         }
 
@@ -174,7 +167,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
           return [...prevUsers, payload.user!];
         });
-        setPendingRegistration(null);
         return { ok: true };
       },
       logout: async () => {
@@ -188,7 +180,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUsers([]);
       }
     }),
-    [isAuthPage, isReady, pendingRegistration, user, users]
+    [isReady, user, users]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
