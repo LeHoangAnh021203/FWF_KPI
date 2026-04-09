@@ -12,8 +12,12 @@ export async function POST(request: Request) {
     void publishAppEventToPersons(recipients, {
       type: "workspace.updated",
       actorId: authState.user?.personId ?? task.assigneeId,
+      action: "created",
+      entityType: "task",
+      entityLabel: task.name,
       projectId: task.projectId,
       entityId: String(task.id),
+      targetPersonIds: [task.assigneeId],
       occurredAt: new Date().toISOString()
     });
     return NextResponse.json({ ok: true, task });

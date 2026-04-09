@@ -33,6 +33,9 @@ export async function POST(request: Request) {
       void publishAppEventToPersons(adminRecipients, {
         type: "approval.updated",
         actorId: sessionUserId ?? "system",
+        action: "rejected",
+        entityType: "approval",
+        entityLabel: approvalRequest.email,
         entityId: approvalRequest.id,
         occurredAt: new Date().toISOString()
       });
@@ -43,6 +46,9 @@ export async function POST(request: Request) {
     void publishAppEventToPersons(adminRecipients, {
       type: "approval.updated",
       actorId: user.personId ?? sessionUserId ?? "system",
+      action: "approved",
+      entityType: "approval",
+      entityLabel: user.email,
       entityId: user.id,
       occurredAt: new Date().toISOString()
     });

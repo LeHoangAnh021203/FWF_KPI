@@ -21,6 +21,7 @@ import {
   sendRoleApprovalRejectedEmail,
   sendRoleApprovalRequestEmail
 } from "@/lib/server/mailer";
+import type { AppRealtimeEntityType, AppRealtimeEventAction, AppRealtimeEventType } from "@/lib/server/realtime";
 
 type DbUser = {
   _id: string;
@@ -145,6 +146,25 @@ type DbSchedule = {
   updatedAt: string;
 };
 
+type DbPersonNotification = {
+  _id?: ObjectId;
+  personId: string;
+  type: AppRealtimeEventType;
+  actorId: string;
+  action?: AppRealtimeEventAction;
+  entityType?: AppRealtimeEntityType;
+  entityLabel?: string;
+  threadId?: string;
+  projectId?: string;
+  scheduleId?: string;
+  entityId?: string;
+  messageId?: string;
+  targetPersonIds?: string[];
+  occurredAt: string;
+  createdAt: string;
+  readAt?: string | null;
+};
+
 type PendingRegistration = {
   _id?: ObjectId;
   email: string;
@@ -248,6 +268,26 @@ export type AccountHistoryRecord = {
   expiresAt?: string;
   approvedAt?: string;
   rejectedAt?: string;
+};
+
+export type UserNotificationRecord = {
+  id: string;
+  personId: string;
+  type: AppRealtimeEventType;
+  actorId: string;
+  action?: AppRealtimeEventAction;
+  entityType?: AppRealtimeEntityType;
+  entityLabel?: string;
+  threadId?: string;
+  projectId?: string;
+  scheduleId?: string;
+  entityId?: string;
+  messageId?: string;
+  targetPersonIds?: string[];
+  occurredAt: string;
+  createdAt: string;
+  readAt?: string | null;
+  unread: boolean;
 };
 
 const supportedTeamIds = companyTeams.map((team) => team.id);
@@ -584,6 +624,28 @@ function mapPendingRegistration(record: PendingRegistration): AccountHistoryReco
     createdAt: record.createdAt,
     updatedAt: record.createdAt,
     expiresAt: record.expiresAt
+  };
+}
+
+function mapDbNotification(record: DbPersonNotification): UserNotificationRecord {
+  return {
+    id: String(record._id),
+    personId: record.personId,
+    type: record.type,
+    actorId: record.actorId,
+    action: record.action,
+    entityType: record.entityType,
+    entityLabel: record.entityLabel,
+    threadId: record.threadId,
+    projectId: record.projectId,
+    scheduleId: record.scheduleId,
+    entityId: record.entityId,
+    messageId: record.messageId,
+    targetPersonIds: record.targetPersonIds ?? [],
+    occurredAt: record.occurredAt,
+    createdAt: record.createdAt,
+    readAt: record.readAt ?? null,
+    unread: !record.readAt
   };
 }
 
@@ -1435,6 +1497,99 @@ export async function getRoleApprovalHistory(sessionUserId: string | null | unde
     const bTime = new Date(b.updatedAt).getTime();
     return bTime - aTime;
   });
+}
+
+export async function getUserNotifications(
+  sessionUserId: string | null | undefined,
+  options?: { limit?: number; unreadOnly?: boolean; cursor?: string }
+) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) {
+    throw new Error("Unauthorized");
+  }
+
+  const limit = Math.min(100, Math.max(1, options?.limit ?? 30));
+  const db = await getMongoDb();
+  const filter: {
+    personId: string;
+    readAt?: null;
+    createdAt?: { $lt: string };
+  } = { personId: actor.person.id };
+
+  if (options?.unreadOnly) {
+    filter.readAt = null;
+  }
+
+  if (options?.cursor) {
+    filter.createdAt = { $lt: options.cursor };
+  }
+
+  const [records, unreadCount] = await Promise.all([
+    db
+      .collection<DbPersonNotification>("person_notifications")
+      .find(filter, { sort: { createdAt: -1 }, limit: limit + 1 })
+      .toArray(),
+    db.collection<DbPersonNotification>("person_notifications").countDocuments({
+      personId: actor.person.id,
+      readAt: null
+    })
+  ]);
+
+  const hasMore = records.length > limit;
+  const visibleRecords = hasMore ? records.slice(0, limit) : records;
+  const nextCursor = hasMore ? visibleRecords[visibleRecords.length - 1]?.createdAt ?? null : null;
+
+  return {
+    notifications: visibleRecords.map(mapDbNotification),
+    hasMore,
+    nextCursor,
+    unreadCount
+  };
+}
+
+export async function markUserNotificationsAsRead(
+  sessionUserId: string | null | undefined,
+  notificationIds?: string[]
+) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) {
+    throw new Error("Unauthorized");
+  }
+
+  const db = await getMongoDb();
+  const now = new Date().toISOString();
+  const baseFilter = { personId: actor.person.id, readAt: null as null };
+
+  if (!notificationIds || notificationIds.length === 0) {
+    const result = await db.collection<DbPersonNotification>("person_notifications").updateMany(baseFilter, {
+      $set: { readAt: now }
+    });
+    return { updatedCount: result.modifiedCount };
+  }
+
+  const objectIds = notificationIds
+    .map((id) => {
+      try {
+        return new ObjectId(id);
+      } catch {
+        return null;
+      }
+    })
+    .filter((id): id is ObjectId => Boolean(id));
+
+  if (objectIds.length === 0) {
+    return { updatedCount: 0 };
+  }
+
+  const result = await db.collection<DbPersonNotification>("person_notifications").updateMany(
+    {
+      ...baseFilter,
+      _id: { $in: objectIds }
+    },
+    { $set: { readAt: now } }
+  );
+
+  return { updatedCount: result.modifiedCount };
 }
 
 export async function approveRoleApprovalRequest(sessionUserId: string | null | undefined, requestId: string) {

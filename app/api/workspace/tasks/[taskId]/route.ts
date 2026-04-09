@@ -21,8 +21,12 @@ export async function PATCH(
     void publishAppEventToPersons(recipients, {
       type: "workspace.updated",
       actorId: authState.user?.personId ?? task.assigneeId,
+      action: body.assigneeId ? "assigned" : "updated",
+      entityType: "task",
+      entityLabel: task.name,
       projectId: task.projectId,
       entityId: String(task.id),
+      targetPersonIds: [task.assigneeId],
       occurredAt: new Date().toISOString()
     });
 

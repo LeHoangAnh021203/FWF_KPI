@@ -22,7 +22,11 @@ export async function PATCH(request: Request, context: RouteContext) {
     void publishAppEventToPersons(recipients, {
       type: "directory.updated",
       actorId: authState.user?.personId ?? person.id,
+      action: "updated",
+      entityType: "person",
+      entityLabel: person.name,
       entityId: person.id,
+      targetPersonIds: [person.id],
       occurredAt: new Date().toISOString()
     });
 
@@ -49,7 +53,10 @@ export async function DELETE(_: Request, context: RouteContext) {
     void publishAppEventToPersons(recipients, {
       type: "directory.updated",
       actorId: authState.user?.personId ?? personId,
+      action: "deleted",
+      entityType: "person",
       entityId: personId,
+      targetPersonIds: [personId],
       occurredAt: new Date().toISOString()
     });
 

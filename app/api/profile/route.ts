@@ -15,7 +15,11 @@ export async function PATCH(request: Request) {
     void publishAppEventToPersons(recipients, {
       type: "directory.updated",
       actorId: authState.user?.personId ?? person.id,
+      action: "updated",
+      entityType: "profile",
+      entityLabel: person.name,
       entityId: person.id,
+      targetPersonIds: [person.id],
       occurredAt: new Date().toISOString()
     });
     return NextResponse.json({ ok: true, person });

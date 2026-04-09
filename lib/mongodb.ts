@@ -46,6 +46,8 @@ async function ensureMongoIndexes(db: Db) {
     db.collection("documents").createIndex({ ownerId: 1, modifiedAt: -1 }),
     db.collection("chat_threads").createIndex({ participantIds: 1, updatedAt: -1 }),
     db.collection("chat_messages").createIndex({ threadId: 1, createdAt: -1 }),
+    db.collection("person_notifications").createIndex({ personId: 1, createdAt: -1 }),
+    db.collection("person_notifications").createIndex({ personId: 1, readAt: 1, createdAt: -1 }),
     db.collection("pending_registrations").createIndex({ email: 1 }),
     db.collection("pending_registrations").createIndex({ expiresAt: 1 }),
     db.collection("role_approval_requests").createIndex({ email: 1, status: 1 }),

@@ -1,6 +1,7 @@
 import "server-only";
 
 import Ably from "ably";
+import { getMongoDb } from "@/lib/mongodb";
 
 export type AppRealtimeEventType =
   | "chat.message.created"
@@ -11,15 +12,54 @@ export type AppRealtimeEventType =
   | "schedule.updated"
   | "approval.updated";
 
+export type AppRealtimeEventAction =
+  | "created"
+  | "updated"
+  | "deleted"
+  | "assigned"
+  | "requested"
+  | "approved"
+  | "rejected";
+
+export type AppRealtimeEntityType =
+  | "task"
+  | "project"
+  | "schedule"
+  | "person"
+  | "profile"
+  | "approval";
+
 export type AppRealtimeEvent = {
   type: AppRealtimeEventType;
   actorId: string;
+  action?: AppRealtimeEventAction;
+  entityType?: AppRealtimeEntityType;
+  entityLabel?: string;
   threadId?: string;
   projectId?: string;
   scheduleId?: string;
   entityId?: string;
   messageId?: string;
+  targetPersonIds?: string[];
   occurredAt: string;
+};
+
+type DbPersonNotification = {
+  personId: string;
+  type: AppRealtimeEventType;
+  actorId: string;
+  action?: AppRealtimeEventAction;
+  entityType?: AppRealtimeEntityType;
+  entityLabel?: string;
+  threadId?: string;
+  projectId?: string;
+  scheduleId?: string;
+  entityId?: string;
+  messageId?: string;
+  targetPersonIds?: string[];
+  occurredAt: string;
+  createdAt: string;
+  readAt?: string | null;
 };
 
 declare global {
@@ -61,16 +101,34 @@ export async function createRealtimeTokenRequest(clientId: string) {
 }
 
 export async function publishAppEventToPersons(personIds: string[], event: AppRealtimeEvent) {
-  const uniquePersonIds = Array.from(new Set(personIds.filter(Boolean)));
-  if (!isRealtimeConfigured() || uniquePersonIds.length === 0) {
+  const uniquePersonIds = Array.from(
+    new Set(personIds.filter((personId) => Boolean(personId) && personId !== event.actorId))
+  );
+  if (uniquePersonIds.length === 0) {
+    return;
+  }
+
+  const createdAt = new Date().toISOString();
+  try {
+    const db = await getMongoDb();
+    const documents: DbPersonNotification[] = uniquePersonIds.map((personId) => ({
+      personId,
+      ...event,
+      createdAt,
+      readAt: null
+    }));
+    await db.collection<DbPersonNotification>("person_notifications").insertMany(documents);
+  } catch {
+    // Persisting notifications should not block the primary action.
+  }
+
+  if (!isRealtimeConfigured()) {
     return;
   }
 
   const client = getAblyRestClient();
   await Promise.allSettled(
-    uniquePersonIds.map((participantId) =>
-      client.channels.get(`person:${participantId}`).publish("app.updated", event)
-    )
+    uniquePersonIds.map((participantId) => client.channels.get(`person:${participantId}`).publish("app.updated", event))
   );
 }
 

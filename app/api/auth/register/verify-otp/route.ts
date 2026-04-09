@@ -17,6 +17,8 @@ export async function POST(request: Request) {
       void publishAppEventToPersons(adminRecipients, {
         type: "approval.updated",
         actorId: "system",
+        action: "requested",
+        entityType: "approval",
         occurredAt: new Date().toISOString()
       });
     }

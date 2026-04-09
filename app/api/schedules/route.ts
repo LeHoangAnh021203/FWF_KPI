@@ -27,9 +27,13 @@ export async function POST(request: Request) {
     void publishAppEventToPersons([...schedule.attendeeIds, schedule.createdByPersonId, ...adminRecipients], {
       type: "schedule.updated",
       actorId: authState.user?.personId ?? schedule.createdByPersonId,
+      action: "created",
+      entityType: "schedule",
+      entityLabel: schedule.title,
       projectId: schedule.projectId,
       scheduleId: schedule.id,
       entityId: schedule.id,
+      targetPersonIds: schedule.attendeeIds,
       occurredAt: new Date().toISOString()
     });
     return NextResponse.json({ ok: true, schedule });

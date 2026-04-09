@@ -18,9 +18,13 @@ export async function PATCH(request: Request, context: RouteContext) {
       void publishAppEventToPersons([...schedule.attendeeIds, schedule.createdByPersonId, ...adminRecipients], {
         type: "schedule.updated",
         actorId: authState.user?.personId ?? schedule.createdByPersonId,
+        action: "updated",
+        entityType: "schedule",
+        entityLabel: schedule.title,
         projectId: schedule.projectId,
         scheduleId: schedule.id,
         entityId: schedule.id,
+        targetPersonIds: schedule.attendeeIds,
         occurredAt: new Date().toISOString()
       });
     }
@@ -43,6 +47,8 @@ export async function DELETE(_: Request, context: RouteContext) {
     void publishAppEventToPersons(recipients.personIds, {
       type: "schedule.updated",
       actorId: authState.user?.personId ?? "system",
+      action: "deleted",
+      entityType: "schedule",
       projectId: recipients.projectId,
       scheduleId,
       entityId: scheduleId,

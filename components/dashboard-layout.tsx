@@ -68,6 +68,55 @@ type ApprovalRequest = {
     createdAt: string
 }
 
+type RealtimeNotification = {
+    id: string
+    title: string
+    message: string
+    time: string
+    unread: boolean
+    occurredAt: string
+}
+
+type RealtimeEventPayload = {
+    type?: string
+    actorId?: string
+    action?: "created" | "updated" | "deleted" | "assigned" | "requested" | "approved" | "rejected"
+    entityType?: "task" | "project" | "schedule" | "person" | "profile" | "approval"
+    entityLabel?: string
+    entityId?: string
+    targetPersonIds?: string[]
+    occurredAt?: string
+}
+
+type StoredNotification = RealtimeEventPayload & {
+    id: string
+    unread: boolean
+    createdAt: string
+}
+
+type NotificationTab = "all" | "unread"
+
+function formatRelativeTime(isoDate: string) {
+    const deltaSeconds = Math.max(0, Math.floor((Date.now() - new Date(isoDate).getTime()) / 1000))
+
+    if (deltaSeconds < 60) {
+        return "Vừa xong"
+    }
+
+    const deltaMinutes = Math.floor(deltaSeconds / 60)
+    if (deltaMinutes < 60) {
+        return `${deltaMinutes} phút trước`
+    }
+
+    const deltaHours = Math.floor(deltaMinutes / 60)
+    if (deltaHours < 24) {
+        return `${deltaHours} giờ trước`
+    }
+
+    const deltaDays = Math.floor(deltaHours / 24)
+    return `${deltaDays} ngày trước`
+}
+
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
     const router = useRouter()
     const pathname = usePathname()
@@ -83,6 +132,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const [isProfileDialogOpen, setIsProfileDialogOpen] = useState(false)
     const [isProfileSubmitting, setIsProfileSubmitting] = useState(false)
     const [approvalRequests, setApprovalRequests] = useState<ApprovalRequest[]>([])
+    const [notifications, setNotifications] = useState<RealtimeNotification[]>([])
+    const [notificationTab, setNotificationTab] = useState<NotificationTab>("all")
+    const [unreadNotificationCount, setUnreadNotificationCount] = useState(0)
+    const [notificationCursor, setNotificationCursor] = useState<string | null>(null)
+    const [hasMoreNotifications, setHasMoreNotifications] = useState(false)
+    const [isLoadingMoreNotifications, setIsLoadingMoreNotifications] = useState(false)
     const [approvalActionKey, setApprovalActionKey] = useState<string | null>(null)
     const [isSigningOut, setIsSigningOut] = useState(false)
     const selectedProjectId = searchParams.get("projectId")
@@ -136,36 +191,138 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         { name: "Red", value: "bg-red-200 dark:bg-red-800" },
     ]
 
-    const notifications = [
-        {
-            id: 1,
-            title: "New task assigned",
-            message: `${people[0]?.name ?? "A teammate"} assigned you to 'Help DStudio get more customers'`,
-            time: "2 minutes ago",
-            unread: true,
-        },
-        {
-            id: 2,
-            title: "Meeting reminder",
-            message: "Kickoff Meeting starts in 30 minutes",
-            time: "28 minutes ago",
-            unread: true,
-        },
-        {
-            id: 3,
-            title: "Task completed",
-            message: `${people[2]?.name ?? "A teammate"} completed 'Return a package'`,
-            time: "1 hour ago",
-            unread: false,
-        },
-        {
-            id: 4,
-            title: "Comment added",
-            message: `${people[1]?.name ?? "A teammate"} commented on 'Plan a trip'`,
-            time: "2 hours ago",
-            unread: false,
-        },
-    ]
+    const buildNotification = useCallback((event: RealtimeEventPayload, id: string, unread: boolean) => {
+        if (!event.type || !event.occurredAt) {
+            return null
+        }
+        const actorName =
+            people.find((person) => person.id === event.actorId)?.name ??
+            (event.actorId === "system" ? "Hệ thống" : "Thành viên")
+        const entityLabel = event.entityLabel?.trim() || "mục công việc"
+
+        let title = "Thông báo mới"
+        let message = `${actorName} vừa cập nhật hệ thống.`
+
+        if (event.type === "workspace.updated") {
+            if (event.entityType === "task" && event.action === "assigned") {
+                title = "Task được giao"
+                message = `${actorName} đã giao task "${entityLabel}" cho bạn.`
+            } else if (event.entityType === "task" && event.action === "created") {
+                title = "Task mới"
+                message = `${actorName} vừa tạo task "${entityLabel}".`
+            } else if (event.entityType === "project" && event.action === "created") {
+                title = "Team mới"
+                message = `${actorName} vừa tạo team "${entityLabel}".`
+            } else {
+                title = "Workspace cập nhật"
+                message = `${actorName} vừa cập nhật "${entityLabel}".`
+            }
+        } else if (event.type === "schedule.updated") {
+            if (event.action === "created") {
+                title = "Lịch mới"
+                message = `${actorName} vừa tạo lịch "${entityLabel}".`
+            } else if (event.action === "deleted") {
+                title = "Lịch đã xoá"
+                message = `${actorName} vừa xoá một lịch liên quan đến bạn.`
+            } else {
+                title = "Lịch cập nhật"
+                message = `${actorName} vừa cập nhật lịch "${entityLabel}".`
+            }
+        } else if (event.type === "directory.updated") {
+            if (event.entityType === "profile") {
+                title = "Hồ sơ cá nhân"
+                message = `${actorName} vừa cập nhật hồ sơ cá nhân.`
+            } else if (event.action === "created") {
+                title = "Thành viên mới"
+                message = `${actorName} vừa thêm thành viên "${entityLabel}".`
+            } else if (event.action === "deleted") {
+                title = "Thành viên đã xoá"
+                message = `${actorName} vừa xoá một thành viên khỏi hệ thống.`
+            } else {
+                title = "Danh bạ cập nhật"
+                message = `${actorName} vừa cập nhật thông tin thành viên.`
+            }
+        } else if (event.type === "approval.updated") {
+            if (event.action === "requested") {
+                title = "Yêu cầu duyệt mới"
+                message = "Có tài khoản mới vừa xác thực OTP và đang chờ duyệt."
+            } else if (event.action === "approved") {
+                title = "Yêu cầu đã duyệt"
+                message = `${actorName} vừa duyệt tài khoản ${entityLabel}.`
+            } else if (event.action === "rejected") {
+                title = "Yêu cầu bị từ chối"
+                message = `${actorName} vừa từ chối tài khoản ${entityLabel}.`
+            }
+        }
+
+        const nextNotification: RealtimeNotification = {
+            id,
+            title,
+            message,
+            time: formatRelativeTime(event.occurredAt),
+            unread,
+            occurredAt: event.occurredAt,
+        }
+        return nextNotification
+    }, [people])
+
+    const loadNotifications = useCallback(async (options?: { append?: boolean }) => {
+        const isAppend = Boolean(options?.append)
+        const query = new URLSearchParams({
+            limit: "20",
+            unreadOnly: notificationTab === "unread" ? "true" : "false",
+        })
+        if (isAppend && notificationCursor) {
+            query.set("cursor", notificationCursor)
+        }
+
+        if (isAppend) {
+            setIsLoadingMoreNotifications(true)
+        }
+
+        const response = await fetch(`/api/notifications?${query.toString()}`, {
+            credentials: "include",
+            cache: "no-store",
+        })
+
+        if (!response.ok) {
+            if (!isAppend) {
+                setNotifications([])
+                setUnreadNotificationCount(0)
+                setNotificationCursor(null)
+                setHasMoreNotifications(false)
+            }
+            setIsLoadingMoreNotifications(false)
+            return
+        }
+
+        const payload = (await response.json()) as {
+            ok: boolean
+            notifications?: StoredNotification[]
+            unreadCount?: number
+            hasMore?: boolean
+            nextCursor?: string | null
+        }
+        if (!payload.ok) {
+            if (!isAppend) {
+                setNotifications([])
+                setUnreadNotificationCount(0)
+                setNotificationCursor(null)
+                setHasMoreNotifications(false)
+            }
+            setIsLoadingMoreNotifications(false)
+            return
+        }
+
+        const items = (payload.notifications ?? [])
+            .map((item) => buildNotification(item, item.id, item.unread))
+            .filter((item): item is RealtimeNotification => Boolean(item))
+        setNotifications((previous) => (isAppend ? [...previous, ...items] : items))
+        setUnreadNotificationCount(payload.unreadCount ?? 0)
+        setNotificationCursor(payload.nextCursor ?? null)
+        setHasMoreNotifications(Boolean(payload.hasMore))
+        setIsLoadingMoreNotifications(false)
+    }, [buildNotification, notificationCursor, notificationTab])
 
     const loadApprovalRequests = useCallback(async () => {
         if (!isAdminUser) {
@@ -328,25 +485,33 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }, [loadApprovalRequests, user?.id])
 
     useEffect(() => {
+        void loadNotifications()
+    }, [loadNotifications, notificationTab, user?.id])
+
+    useEffect(() => {
         if (!user?.personId) {
             return
         }
 
         return subscribeToPersonChannel(user.personId, (message) => {
-            const payload = message.data as { type?: string } | undefined
-
-            if (payload?.type === "approval.updated") {
-                void loadApprovalRequests()
+            const payload = message.data as RealtimeEventPayload | undefined
+            if (!payload?.type) {
                 return
             }
 
-            if (payload?.type === "directory.updated") {
+            if (payload?.type === "approval.updated") {
+                void loadApprovalRequests()
+            }
+
+            if (payload.type === "directory.updated" || payload.type === "workspace.updated" || payload.type === "schedule.updated") {
                 void refreshSession().catch(() => {
                     // Ignore transient realtime refresh failures.
                 })
             }
+
+            void loadNotifications()
         })
-    }, [loadApprovalRequests, refreshSession, user?.personId])
+    }, [loadApprovalRequests, loadNotifications, refreshSession, user?.personId])
 
     return (
         <div className="flex h-screen bg-gray-50 dark:bg-gray-900">
@@ -570,7 +735,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                 <PopoverTrigger asChild>
                                     <Button variant="ghost" size="icon" className="relative">
                                         <Bell className="w-4 h-4" />
-                                        {(approvalRequests.length > 0 || notifications.some((item) => item.unread)) && (
+                                        {(approvalRequests.length > 0 || unreadNotificationCount > 0) && (
                                             <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full"></span>
                                         )}
                                     </Button>
@@ -582,8 +747,36 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                     <div className="space-y-4">
                                         <div className="flex items-center justify-between">
                                             <h3 className="font-semibold text-gray-900 dark:text-white">Notifications</h3>
-                                            <Button variant="ghost" size="sm" className="text-gray-600 dark:text-gray-300">
+                                            <Button
+                                                variant="ghost"
+                                                size="sm"
+                                                className="text-gray-600 dark:text-gray-300"
+                                                onClick={() => {
+                                                    void fetch("/api/notifications", {
+                                                        method: "PATCH",
+                                                        headers: { "Content-Type": "application/json" },
+                                                        credentials: "include",
+                                                        body: JSON.stringify({}),
+                                                    }).then(() => loadNotifications())
+                                                }}
+                                            >
                                                 Mark all as read
+                                            </Button>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <Button
+                                                size="sm"
+                                                variant={notificationTab === "all" ? "default" : "outline"}
+                                                onClick={() => setNotificationTab("all")}
+                                            >
+                                                All
+                                            </Button>
+                                            <Button
+                                                size="sm"
+                                                variant={notificationTab === "unread" ? "default" : "outline"}
+                                                onClick={() => setNotificationTab("unread")}
+                                            >
+                                                Unread
                                             </Button>
                                         </div>
                                         <Separator className="bg-gray-200 dark:bg-gray-700" />
@@ -637,6 +830,22 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                                     </div>
                                                 </div>
                                             ))}
+                                            {approvalRequests.length === 0 && notifications.length === 0 ? (
+                                                <p className="py-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                                                    Chưa có thông báo mới.
+                                                </p>
+                                            ) : null}
+                                            {hasMoreNotifications ? (
+                                                <Button
+                                                    size="sm"
+                                                    variant="outline"
+                                                    className="w-full"
+                                                    loading={isLoadingMoreNotifications}
+                                                    onClick={() => void loadNotifications({ append: true })}
+                                                >
+                                                    {isLoadingMoreNotifications ? "Đang tải..." : "Load more"}
+                                                </Button>
+                                            ) : null}
                                         </div>
                                     </div>
                                 </PopoverContent>
