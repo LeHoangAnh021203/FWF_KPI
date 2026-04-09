@@ -93,7 +93,7 @@ function maskEmail(email: string) {
 
 export function AuthShell({ mode }: { mode: AuthMode }) {
   const router = useRouter();
-  const { requestLoginOtp, verifyLoginOtp, requestRegistrationOtp, verifyRegistrationOtp, users } = useAuth();
+  const { requestLoginOtp, verifyLoginOtp, requestRegistrationOtp, verifyRegistrationOtp, refreshSession, users } = useAuth();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [department, setDepartment] = useState<Department>("IT");
@@ -185,6 +185,7 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
         setIsSubmitting(false);
         return;
       }
+      await refreshSession();
       router.replace("/dashboard" as Route);
       return;
     }
@@ -243,6 +244,7 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
       return;
     }
 
+    await refreshSession();
     router.replace("/dashboard" as Route);
   }
 
