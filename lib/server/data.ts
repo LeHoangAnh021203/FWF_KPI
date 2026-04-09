@@ -4,7 +4,7 @@ import { randomInt } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { getMongoDb } from "@/lib/mongodb";
 import {
-  COMPANY_DOMAIN,
+  isCompanyEmail,
   isAdminLikeRole,
   requiresApprovalRole,
   type Department,
@@ -1000,10 +1000,6 @@ export async function createLoginOtp(email: string) {
   const db = await getMongoDb();
   const normalizedEmail = normalizeEmail(email);
 
-  if (!normalizedEmail.endsWith(COMPANY_DOMAIN)) {
-    return { ok: false, message: `Chỉ chấp nhận email công ty ${COMPANY_DOMAIN}` };
-  }
-
   const user = await db.collection<DbUser>("users").findOne({ email: normalizedEmail });
   if (!user) {
     const pendingApproval = await db.collection<DbRoleApprovalRequest>("role_approval_requests").findOne({
@@ -1067,10 +1063,6 @@ export async function createRegistrationOtp(input: {
 }) {
   const db = await getMongoDb();
   const normalizedEmail = normalizeEmail(input.email);
-
-  if (!normalizedEmail.endsWith(COMPANY_DOMAIN)) {
-    return { ok: false, message: `Email phải thuộc hệ thống Face Wash Fox và có đuôi ${COMPANY_DOMAIN}` };
-  }
 
   const existingUser = await db.collection<DbUser>("users").findOne({ email: normalizedEmail });
   if (existingUser) {
@@ -1146,7 +1138,7 @@ export async function verifyRegistrationOtp(email: string, otp: string) {
 
   const now = new Date().toISOString();
 
-  if (requiresApprovalRole(pending.role)) {
+  if (requiresApprovalRole(pending.role) || !isCompanyEmail(normalizedEmail)) {
     const rootApprover = await getRootApprover(db);
     const approvalPayload: DbRoleApprovalRequest = {
       email: normalizedEmail,
@@ -1185,7 +1177,7 @@ export async function verifyRegistrationOtp(email: string, otp: string) {
     return {
       ok: true,
       requiresApproval: true,
-      message: "OTP hợp lệ. Tài khoản đang chờ admin gốc duyệt. Bạn sẽ nhận email khi được phê duyệt."
+      message: "OTP hợp lệ. Tài khoản đang chờ admin/CEO duyệt. Bạn sẽ nhận email khi được phê duyệt."
     };
   }
 
@@ -1423,9 +1415,6 @@ export async function updateOwnProfile(
   }
 
   const normalizedEmail = normalizeEmail(updates.email);
-  if (!normalizedEmail.endsWith(COMPANY_DOMAIN)) {
-    throw new Error(`Chỉ chấp nhận email công ty ${COMPANY_DOMAIN}`);
-  }
 
   const duplicatePerson = await db.collection<DbPerson>("people").findOne({
     email: normalizedEmail,

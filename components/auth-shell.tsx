@@ -9,6 +9,7 @@ import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp
 import { COMPANY_DOMAIN, departments, registrationRoles, type Department, type UserRole } from "@/lib/auth";
 
 type AuthMode = "login" | "register";
+type EmailMode = "company" | "external";
 
 const roleLabels: Record<UserRole, string> = {
   admin: "Admin",
@@ -55,6 +56,10 @@ function normalizeCompanyEmailInput(value: string) {
   return localPart ? `${localPart}${COMPANY_DOMAIN}` : "";
 }
 
+function normalizeExternalEmailInput(value: string) {
+  return value.replace(/\s+/g, "").trim().toLowerCase();
+}
+
 function CompanyEmailField({ value, onChange }: Pick<FieldProps, "value" | "onChange">) {
   return (
     <label className="grid gap-2">
@@ -73,6 +78,18 @@ function CompanyEmailField({ value, onChange }: Pick<FieldProps, "value" | "onCh
         <span className="ml-2 shrink-0 font-medium text-[#dd6b4d]">{COMPANY_DOMAIN}</span>
       </div>
     </label>
+  );
+}
+
+function ExternalEmailField({ value, onChange }: Pick<FieldProps, "value" | "onChange">) {
+  return (
+    <InputField
+      label="Email cá nhân"
+      value={value}
+      onChange={(nextValue) => onChange(normalizeExternalEmailInput(nextValue))}
+      placeholder="you@example.com"
+      type="email"
+    />
   );
 }
 
@@ -96,6 +113,7 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
   const { requestLoginOtp, verifyLoginOtp, requestRegistrationOtp, verifyRegistrationOtp, refreshSession, users } = useAuth();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [emailMode, setEmailMode] = useState<EmailMode>("company");
   const [department, setDepartment] = useState<Department>("IT");
   const [role, setRole] = useState<UserRole>("employee");
   const [otp, setOtp] = useState("");
@@ -111,6 +129,22 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
   const isCeoRole = role === "ceo";
   const effectiveDepartment: Department = isCeoRole ? "Vận hành" : department;
   const isOtpStep = mode === "login" ? loginStep === "otp" : registerStep === "otp";
+  const isExternalEmail = emailMode === "external";
+
+  function switchEmailMode(nextMode: EmailMode) {
+    if (isOtpStep || nextMode === emailMode) {
+      return;
+    }
+
+    setEmailMode(nextMode);
+    if (nextMode === "company") {
+      const localPart = extractEmailLocalPart(email);
+      setEmail(localPart ? `${localPart}${COMPANY_DOMAIN}` : "");
+      return;
+    }
+
+    setEmail("");
+  }
 
   useEffect(() => {
     if (!isOtpStep || resendCountdown <= 0) {
@@ -148,7 +182,7 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
     setOtp("");
     setOtpPreview(result.otp ?? "");
     setResendCountdown(30);
-    setSuccess("Mã OTP mới đã được gửi tới email công ty.");
+    setSuccess("Mã OTP mới đã được gửi tới email đã đăng ký.");
     setIsSubmitting(false);
   }
 
@@ -174,7 +208,7 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
         setOtpPreview(result.otp ?? "");
         setLoginStep("otp");
         setResendCountdown(30);
-        setSuccess("OTP đăng nhập đã được gửi tới email công ty.");
+        setSuccess("OTP đăng nhập đã được gửi tới email đã đăng ký.");
         setIsSubmitting(false);
         return;
       }
@@ -214,8 +248,8 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
       setRegisterStep("otp");
       setResendCountdown(30);
       setSuccess(
-        role === "admin" || role === "ceo"
-          ? "OTP đã được gửi tới mail công ty. Sau khi xác thực, tài khoản sẽ chuyển sang trạng thái chờ duyệt. Hệ thống sẽ phản hồi trong thời gian sớm nhất."
+        role === "admin" || role === "ceo" || isExternalEmail
+          ? "OTP đã được gửi. Sau khi xác thực, tài khoản sẽ chuyển sang trạng thái chờ admin/CEO duyệt trước khi sử dụng."
           : "OTP đã được gửi tới email công ty. Nhập mã xác nhận để hoàn tất đăng ký."
       );
       setIsSubmitting(false);
@@ -238,6 +272,7 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
       setOtpPreview("");
       setName("");
       setEmail("");
+      setEmailMode("company");
       setRole("employee");
       setDepartment("IT");
       setIsSubmitting(false);
@@ -276,7 +311,7 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
         <h2 className="text-3xl font-semibold text-text">
           {mode === "login"
             ? loginStep === "form"
-              ? "Đăng nhập tài khoản công ty"
+              ? "Đăng nhập tài khoản"
               : "Xác nhận OTP đăng nhập"
             : registerStep === "form"
               ? "Tạo tài khoản theo phòng ban"
@@ -285,10 +320,10 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
         <p className="mt-3 text-sm leading-7 text-muted">
           {mode === "login"
             ? loginStep === "form"
-              ? "Nhập email nội bộ để nhận OTP đăng nhập."
-              : "Nhập mã OTP đã gửi tới email công ty để hoàn tất đăng nhập."
+              ? "Nhập email công ty hoặc email cá nhân để nhận OTP đăng nhập."
+              : "Nhập mã OTP đã gửi tới email của bạn để hoàn tất đăng nhập."
             : registerStep === "form"
-              ? "Đăng ký bằng email công ty, chọn phòng ban và vai trò rồi xác thực bằng OTP."
+              ? "Đăng ký bằng email công ty hoặc email cá nhân, chọn phòng ban và vai trò rồi xác thực bằng OTP."
               : "Tài khoản chỉ được tạo sau khi OTP được xác nhận thành công."}
         </p>
 
@@ -302,7 +337,41 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
             />
           ) : null}
 
-          <CompanyEmailField value={email} onChange={setEmail} />
+          <div className="grid gap-2">
+            <span className="text-sm font-medium text-text">Loại email</span>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                disabled={isOtpStep}
+                onClick={() => switchEmailMode("company")}
+                className={`rounded-xl border px-3 py-2 text-sm font-medium transition ${
+                  emailMode === "company"
+                    ? "border-ink bg-orange-500 text-white"
+                    : "border-[rgba(55,45,33,0.12)] bg-white/70 text-black"
+                } ${isOtpStep ? "cursor-not-allowed opacity-60" : ""}`}
+              >
+                Email công ty
+              </button>
+              <button
+                type="button"
+                disabled={isOtpStep}
+                onClick={() => switchEmailMode("external")}
+                className={`rounded-xl border px-3 py-2 text-sm font-medium transition ${
+                  emailMode === "external"
+                    ? "border-ink bg-orange-500 text-white"
+                    : "border-[rgba(55,45,33,0.12)] bg-white/70 text-black"
+                } ${isOtpStep ? "cursor-not-allowed opacity-60" : ""}`}
+              >
+                Email cá nhân
+              </button>
+            </div>
+          </div>
+
+          {emailMode === "company" ? (
+            <CompanyEmailField value={email} onChange={setEmail} />
+          ) : (
+            <ExternalEmailField value={email} onChange={setEmail} />
+          )}
 
           {mode === "register" && registerStep === "form" ? (
             <>
