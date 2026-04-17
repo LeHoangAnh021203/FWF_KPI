@@ -15,7 +15,8 @@ const roleLabels: Record<UserRole, string> = {
   admin: "Admin",
   ceo: "CEO",
   employee: "Nhân viên",
-  leader: "Leader"
+  leader: "Leader",
+  store_staff: "Nhân viên cửa hàng"
 };
 
 type FieldProps = {
@@ -124,6 +125,19 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
   const [success, setSuccess] = useState("");
   const [resendCountdown, setResendCountdown] = useState(30);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const availableRoles = useMemo(() => {
+    if (department === "Cửa hàng") return registrationRoles.filter((r) => r === "store_staff");
+    return registrationRoles.filter((r) => r !== "store_staff");
+  }, [department]);
+
+  useEffect(() => {
+    if (department === "Cửa hàng" && role !== "store_staff") {
+      setRole("store_staff");
+    } else if (department !== "Cửa hàng" && role === "store_staff") {
+      setRole("employee");
+    }
+  }, [department, role]);
 
   const maskedEmail = useMemo(() => maskEmail(email), [email]);
   const isCeoRole = role === "ceo";
@@ -399,7 +413,7 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
                   onChange={(event) => setRole(event.target.value as UserRole)}
                   className="rounded-2xl border border-[rgba(55,45,33,0.12)] bg-white/75 px-4 py-3 outline-none transition focus:border-ink"
                 >
-                  {registrationRoles.map((item) => (
+                  {availableRoles.map((item) => (
                     <option key={item} value={item}>
                       {roleLabels[item]}
                     </option>
@@ -445,7 +459,7 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
                           <InputOTPSlot
                             key={index}
                             index={index}
-                            className="h-24 w-[4.6rem] rounded-[18px] border border-[rgba(135,150,190,0.2)] bg-white text-3xl font-semibold text-[#151b2f] shadow-[0_10px_24px_rgba(120,146,220,0.08)] first:rounded-[18px] first:border last:rounded-[18px] focus-within:border-[#3b6af5] data-[active=true]:border-[#3b6af5] data-[active=true]:ring-4 data-[active=true]:ring-[#3b6af5]/15"
+                            className="h-24 w-[4.6rem] rounded-[18px] border border-[rgba(135,150,190,0.2)] bg-white text-3xl font-semibold text-[#151b2f] shadow-[0_10px_24px_rgba(120,146,220,0.08)] first:rounded-[18px] first:border last:rounded-[18px]"
                           />
                         ))}
                       </InputOTPGroup>
@@ -478,7 +492,9 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
             type="submit"
             disabled={isSubmitting}
             className={`px-5 py-3 font-medium text-white ${isOtpStep
-              ? "rounded-2xl bg-[linear-gradient(180deg,#95afff,#84a0f5)] text-[15px] shadow-[0_18px_40px_rgba(120,146,220,0.22)]"
+              ? otp.length === 6
+                ? "rounded-2xl bg-[linear-gradient(180deg,#fb923c,#dd6b4d)] text-[15px] shadow-[0_18px_40px_rgba(221,107,77,0.30)] transition-all duration-300"
+                : "rounded-2xl bg-[linear-gradient(180deg,#95afff,#84a0f5)] text-[15px] shadow-[0_18px_40px_rgba(120,146,220,0.22)] transition-all duration-300"
               : "rounded-full bg-[linear-gradient(135deg,#2a3142,#dd6b4d)]"
               } ${isSubmitting ? "cursor-not-allowed opacity-70" : ""}`}
           >

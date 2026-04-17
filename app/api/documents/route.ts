@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 import { createDocumentRecord, getDocumentsData } from "@/lib/server/data";
 import { getSessionUserId } from "@/lib/server/session";
 
-export async function GET() {
+export async function GET(request: Request) {
   const sessionUserId = await getSessionUserId();
-  const documents = await getDocumentsData(sessionUserId);
+  const { searchParams } = new URL(request.url);
+  const folderId = searchParams.get("folderId") ?? undefined;
+  const documents = await getDocumentsData(sessionUserId, folderId);
   return NextResponse.json({ documents });
 }
 

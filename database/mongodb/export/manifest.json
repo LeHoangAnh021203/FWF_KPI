@@ -33,6 +33,10 @@
     {
       "name": "chat_messages",
       "count": 12
+    },
+    {
+      "name": "document_folders",
+      "count": 3
     }
   ]
 }

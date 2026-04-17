@@ -43,5 +43,13 @@
     ],
     "createdAt": "2026-04-07T02:53:21.134Z",
     "updatedAt": "2026-04-07T02:53:21.134Z"
+  },
+  {
+    "_id": "store",
+    "name": "Cửa hàng",
+    "color": "bg-teal-100 text-teal-800 dark:bg-teal-900 dark:text-teal-300",
+    "memberIds": [],
+    "createdAt": "2026-04-17T00:00:00.000Z",
+    "updatedAt": "2026-04-17T00:00:00.000Z"
   }
 ]

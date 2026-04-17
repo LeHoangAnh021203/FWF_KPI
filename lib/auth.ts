@@ -1,4 +1,4 @@
-export type UserRole = "ceo" | "leader" | "employee" | "admin";
+export type UserRole = "ceo" | "leader" | "employee" | "admin" | "store_staff";
 
 export type Department =
   | "Hành chính - Nhân sự"
@@ -6,7 +6,8 @@ export type Department =
   | "Sales"
   | "Marketing"
   | "Kế toán"
-  | "Vận hành";
+  | "Vận hành"
+  | "Cửa hàng";
 
 export type UserAccount = {
   id: string;
@@ -27,17 +28,18 @@ export const departments: Department[] = [
   "Marketing",
   "Sales",
   "Kế toán",
-  "Vận hành"
+  "Vận hành",
+  "Cửa hàng"
 ];
 
-export const registrationRoles: UserRole[] = ["employee", "leader", "ceo", "admin"];
+export const registrationRoles: UserRole[] = ["employee", "store_staff", "leader", "ceo", "admin"];
 
 export function isAdminLikeRole(role: UserRole | null | undefined) {
   return role === "admin" || role === "ceo";
 }
 
 export function requiresApprovalRole(role: UserRole | null | undefined) {
-  return role === "admin" || role === "ceo";
+  return role === "admin" || role === "ceo" || role === "leader";
 }
 
 export const seededUsers: UserAccount[] = [

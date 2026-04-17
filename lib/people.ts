@@ -14,7 +14,7 @@ export interface Person {
   team: string;
 }
 
-export const personDisplayRoles = ["Nhân viên", "Leader", "Admin", "CEO"] as const;
+export const personDisplayRoles = ["Nhân viên", "Nhân viên cửa hàng", "Leader", "Admin", "CEO"] as const;
 
 export const teams = [
   {
@@ -48,6 +48,11 @@ export const teams = [
     id: "sales",
     name: "Sales",
     color: "bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-300",
+  },
+  {
+    id: "store",
+    name: "Cửa hàng",
+    color: "bg-teal-100 text-teal-800 dark:bg-teal-900 dark:text-teal-300",
   },
 ];
 

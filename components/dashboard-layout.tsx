@@ -63,9 +63,17 @@ type ApprovalRequest = {
     id: string
     email: string
     name: string
-    role: "admin" | "ceo" | "leader" | "employee"
+    role: "admin" | "ceo" | "leader" | "employee" | "store_staff"
     department: string
     createdAt: string
+}
+
+const roleDisplayLabel: Record<ApprovalRequest["role"], string> = {
+    admin: "Admin",
+    ceo: "CEO",
+    leader: "Leader",
+    employee: "Nhân viên",
+    store_staff: "Nhân viên cửa hàng"
 }
 
 type RealtimeNotification = {
@@ -787,7 +795,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                                     className="rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-700/50 dark:bg-amber-900/20"
                                                 >
                                                     <p className="text-sm font-medium text-gray-900 dark:text-white">
-                                                        Yêu cầu duyệt {request.role.toUpperCase()}
+                                                        Yêu cầu duyệt {roleDisplayLabel[request.role]}
                                                     </p>
                                                     <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
                                                         {request.name} · {request.email}

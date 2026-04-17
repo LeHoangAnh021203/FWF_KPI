@@ -4,14 +4,13 @@ import { randomInt } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { getMongoDb } from "@/lib/mongodb";
 import {
-  isCompanyEmail,
   isAdminLikeRole,
   requiresApprovalRole,
   type Department,
   type UserAccount,
   type UserRole
 } from "@/lib/auth";
-import type { Document } from "@/lib/documents";
+import type { Document, Folder } from "@/lib/documents";
 import { personDisplayRoles, teams as companyTeams, type Person } from "@/lib/people";
 import type { Project, Task, TaskAttachment, TaskGroups, TimePeriod } from "@/components/workspace-context";
 import {
@@ -36,7 +35,7 @@ type DbUser = {
   updatedAt?: string;
 };
 
-type StoredUserRole = UserRole | "boss" | "manager";
+type StoredUserRole = UserRole | "boss" | "manager" | "store_staff";
 
 type DbPerson = {
   _id: string;
@@ -102,10 +101,23 @@ type DbDocument = {
   createdAt: string;
   modifiedAt: string;
   folder?: string;
+  folderId?: string;
   tags: string[];
   isStarred: boolean;
   thumbnail?: string | null;
   description?: string;
+  url?: string;
+  visibility?: "team" | "office" | "store" | "specific";
+  visibleToPersonIds?: string[];
+};
+
+type DbFolder = {
+  _id: string;
+  name: string;
+  ownerId: string;
+  teamId: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 type DbChatThread = {
@@ -327,6 +339,10 @@ function normalizePersonDisplayRole(role: string) {
     case "member":
     case "staff":
       return "Nhân viên";
+    case "store_staff":
+    case "nhan vien cua hang":
+    case "nhân viên cửa hàng":
+      return "Nhân viên cửa hàng";
     case "leader":
     case "lead":
     case "manager":
@@ -543,6 +559,8 @@ function mapDepartmentToTeamId(department: Department) {
       return "sales";
     case "Hành chính - Nhân sự":
       return "design";
+    case "Cửa hàng":
+      return "store";
     default:
       return "product";
   }
@@ -562,6 +580,8 @@ function mapTeamIdToDepartment(teamId: string): Department {
       return "Vận hành";
     case "sales":
       return "Sales";
+    case "store":
+      return "Cửa hàng";
     default:
       return "Vận hành";
   }
@@ -783,10 +803,25 @@ function mapDbDocument(document: DbDocument): Document {
     createdAt: document.createdAt,
     modifiedAt: document.modifiedAt,
     folder: document.folder,
+    folderId: document.folderId,
     tags: document.tags ?? [],
     isStarred: document.isStarred,
     thumbnail: document.thumbnail ?? undefined,
-    description: document.description
+    description: document.description,
+    url: document.url,
+    visibility: document.visibility ?? "team",
+    visibleToPersonIds: document.visibleToPersonIds ?? []
+  };
+}
+
+function mapDbFolder(folder: DbFolder): Folder {
+  return {
+    id: folder._id,
+    name: folder.name,
+    ownerId: folder.ownerId,
+    teamId: folder.teamId,
+    createdAt: folder.createdAt,
+    updatedAt: folder.updatedAt
   };
 }
 
@@ -937,11 +972,17 @@ async function getSessionActor(sessionUserId?: string | null): Promise<SessionAc
       team: "all",
     };
 
-  const teamMembers = isAdmin
-    ? people
-    : people.filter((candidate) => candidate.team === actorPerson.team || adminVisiblePersonIds.has(candidate.id));
   const isLeader =
     isAdmin || user.role === "leader" || actorPerson.role.toLowerCase() === "leader";
+  const teamMembers = isAdmin
+    ? people
+    : people.filter((candidate) => {
+        if (adminVisiblePersonIds.has(candidate.id)) return true;
+        if (candidate.team === actorPerson.team) return true;
+        // Leader Vận hành thấy được cả nhân viên cửa hàng
+        if (isLeader && actorPerson.team === "product" && candidate.team === "store") return true;
+        return false;
+      });
 
   return {
     user,
@@ -1138,7 +1179,7 @@ export async function verifyRegistrationOtp(email: string, otp: string) {
 
   const now = new Date().toISOString();
 
-  if (requiresApprovalRole(pending.role) || !isCompanyEmail(normalizedEmail)) {
+  if (requiresApprovalRole(pending.role)) {
     const rootApprover = await getRootApprover(db);
     const approvalPayload: DbRoleApprovalRequest = {
       email: normalizedEmail,
@@ -2095,19 +2136,48 @@ export async function deleteScheduleRecord(
   return true;
 }
 
-export async function getDocumentsData(sessionUserId?: string | null) {
+export async function getDocumentsData(sessionUserId?: string | null, folderId?: string | null) {
   const actor = await getSessionActor(sessionUserId);
-  if (!actor) {
-    return [];
-  }
+  if (!actor) return [];
 
   const db = await getMongoDb();
-  const visibleOwnerIds = actor.teamMembers.map((member) => member.id);
-  const documents = await db
-    .collection<DbDocument>("documents")
-    .find({ ownerId: { $in: visibleOwnerIds } }, { sort: { modifiedAt: -1 } })
-    .toArray();
-  return documents.map(mapDbDocument);
+
+  const query: Record<string, unknown> = {};
+  if (folderId !== undefined) query.folderId = folderId ?? null;
+
+  const [allDocs, allPeople] = await Promise.all([
+    db.collection<DbDocument>("documents").find(query, { sort: { modifiedAt: -1 } }).toArray(),
+    db.collection<DbPerson>("people").find().toArray(),
+  ]);
+
+  const personTeamMap = new Map(allPeople.map((p) => [p._id, p.teamId]));
+  // Vận hành leader: team "product" + isLeader
+  const isVanHanhLeader = actor.isLeader && !actor.isAdmin && actor.person.team === "product";
+
+  return allDocs
+    .filter((doc) => {
+      if (actor.isAdmin) return true;
+
+      const visibility = doc.visibility ?? "team";
+
+      if (visibility === "team") {
+        const ownerTeam = personTeamMap.get(doc.ownerId);
+        return actor.person.team === ownerTeam || doc.ownerId === actor.person.id;
+      }
+      if (visibility === "office") {
+        return actor.person.team !== "store";
+      }
+      if (visibility === "store") {
+        return actor.person.team === "store" || isVanHanhLeader;
+      }
+      // "specific"
+      return (
+        doc.ownerId === actor.person.id ||
+        actor.isLeader ||
+        (doc.visibleToPersonIds ?? []).includes(actor.person.id)
+      );
+    })
+    .map(mapDbDocument);
 }
 
 export async function createDocumentRecord(
@@ -2115,14 +2185,12 @@ export async function createDocumentRecord(
   input: Partial<Document> & { name: string; type: Document["type"] }
 ) {
   const actor = await getSessionActor(sessionUserId);
-  if (!actor) {
-    throw new Error("Unauthorized");
-  }
+  if (!actor) throw new Error("Unauthorized");
+  if (!actor.isLeader) throw new Error("Forbidden");
 
   const now = new Date().toISOString();
-  const documentId = `doc_${Date.now()}`;
   const nextDocument: DbDocument = {
-    _id: documentId,
+    _id: `doc_${Date.now()}`,
     name: input.name,
     type: input.type,
     size: input.size ?? 0,
@@ -2130,10 +2198,14 @@ export async function createDocumentRecord(
     createdAt: now,
     modifiedAt: now,
     folder: input.folder,
+    folderId: input.folderId,
     tags: input.tags ?? [],
     isStarred: Boolean(input.isStarred),
     thumbnail: input.thumbnail ?? null,
-    description: input.description
+    description: input.description,
+    url: input.url,
+    visibility: input.visibility ?? "team",
+    visibleToPersonIds: input.visibleToPersonIds ?? []
   };
 
   const db = await getMongoDb();
@@ -2147,30 +2219,23 @@ export async function updateDocumentRecord(
   updates: Partial<Document>
 ) {
   const actor = await getSessionActor(sessionUserId);
-  if (!actor) {
-    throw new Error("Unauthorized");
-  }
+  if (!actor) throw new Error("Unauthorized");
 
   const db = await getMongoDb();
   const existing = await db.collection<DbDocument>("documents").findOne({ _id: documentId });
-  if (!existing || !canAccessPerson(actor, existing.ownerId)) {
-    return null;
-  }
+  if (!existing || !canAccessPerson(actor, existing.ownerId)) return null;
+  if (!actor.isLeader && !actor.isAdmin && existing.ownerId !== actor.person.id) return null;
 
-  if (!actor.isLeader && !actor.isAdmin && existing.ownerId !== actor.person.id) {
-    return null;
-  }
-
-  const payload: Partial<DbDocument> = {
-    modifiedAt: new Date().toISOString()
-  };
-
+  const payload: Partial<DbDocument> = { modifiedAt: new Date().toISOString() };
   if (updates.name !== undefined) payload.name = updates.name;
   if (updates.folder !== undefined) payload.folder = updates.folder;
+  if (updates.folderId !== undefined) payload.folderId = updates.folderId;
   if (updates.tags !== undefined) payload.tags = updates.tags;
   if (updates.isStarred !== undefined) payload.isStarred = updates.isStarred;
   if (updates.description !== undefined) payload.description = updates.description;
   if (updates.thumbnail !== undefined) payload.thumbnail = updates.thumbnail;
+  if (updates.visibility !== undefined) payload.visibility = updates.visibility;
+  if (updates.visibleToPersonIds !== undefined) payload.visibleToPersonIds = updates.visibleToPersonIds;
 
   await db.collection<DbDocument>("documents").updateOne({ _id: documentId }, { $set: payload });
   const updated = await db.collection<DbDocument>("documents").findOne({ _id: documentId });
@@ -2179,21 +2244,67 @@ export async function updateDocumentRecord(
 
 export async function deleteDocumentRecord(sessionUserId: string | null | undefined, documentId: string) {
   const actor = await getSessionActor(sessionUserId);
-  if (!actor) {
-    throw new Error("Unauthorized");
-  }
+  if (!actor) throw new Error("Unauthorized");
 
   const db = await getMongoDb();
   const existing = await db.collection<DbDocument>("documents").findOne({ _id: documentId });
-  if (!existing || !canAccessPerson(actor, existing.ownerId)) {
-    return false;
-  }
-
-  if (!actor.isLeader && !actor.isAdmin && existing.ownerId !== actor.person.id) {
-    return false;
-  }
+  if (!existing || !canAccessPerson(actor, existing.ownerId)) return false;
+  if (!actor.isLeader && !actor.isAdmin && existing.ownerId !== actor.person.id) return false;
 
   await db.collection<DbDocument>("documents").deleteOne({ _id: documentId });
+  return true;
+}
+
+export async function getFoldersData(sessionUserId?: string | null) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) return [];
+
+  const db = await getMongoDb();
+  const folderQuery = actor.isAdmin ? {} : { teamId: actor.person.team };
+  const folders = await db
+    .collection<DbFolder>("document_folders")
+    .find(folderQuery, { sort: { createdAt: -1 } })
+    .toArray();
+  return folders.map(mapDbFolder);
+}
+
+export async function createFolderRecord(
+  sessionUserId: string | null | undefined,
+  input: { name: string }
+) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) throw new Error("Unauthorized");
+  if (!actor.isLeader && !actor.isAdmin) throw new Error("Forbidden");
+
+  const now = new Date().toISOString();
+  const folder: DbFolder = {
+    _id: `folder_${Date.now()}`,
+    name: input.name.trim(),
+    ownerId: actor.person.id,
+    teamId: actor.person.team,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  const db = await getMongoDb();
+  await db.collection<DbFolder>("document_folders").insertOne(folder);
+  return mapDbFolder(folder);
+}
+
+export async function deleteFolderRecord(sessionUserId: string | null | undefined, folderId: string) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) throw new Error("Unauthorized");
+  if (!actor.isLeader && !actor.isAdmin) throw new Error("Forbidden");
+
+  const db = await getMongoDb();
+  const folder = await db.collection<DbFolder>("document_folders").findOne({ _id: folderId });
+  if (!folder || folder.teamId !== actor.person.team) return false;
+
+  await db.collection<DbFolder>("document_folders").deleteOne({ _id: folderId });
+  await db.collection<DbDocument>("documents").updateMany(
+    { folderId },
+    { $unset: { folderId: "" } }
+  );
   return true;
 }
 

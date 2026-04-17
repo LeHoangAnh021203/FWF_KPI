@@ -1,3 +1,12 @@
+export interface Folder {
+  id: string;
+  name: string;
+  ownerId: string;
+  teamId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Document {
   id: string;
   name: string;
@@ -11,16 +20,22 @@ export interface Document {
     | "png"
     | "mp4"
     | "zip"
-    | "figma";
+    | "figma"
+    | "link"
+    | "image";
   size: number; // in bytes
   ownerId: string;
   createdAt: string;
   modifiedAt: string;
   folder?: string;
+  folderId?: string;
   tags: string[];
   isStarred: boolean;
   thumbnail?: string;
   description?: string;
+  url?: string;
+  visibility: "team" | "office" | "store" | "specific";
+  visibleToPersonIds: string[];
 }
 
 export const documentTypes = {
@@ -74,6 +89,16 @@ export const documentTypes = {
     color: "text-indigo-600 dark:text-indigo-400",
     bgColor: "bg-indigo-50 dark:bg-indigo-900/20",
   },
+  link: {
+    icon: "🔗",
+    color: "text-cyan-600 dark:text-cyan-400",
+    bgColor: "bg-cyan-50 dark:bg-cyan-900/20",
+  },
+  image: {
+    icon: "🖼️",
+    color: "text-violet-600 dark:text-violet-400",
+    bgColor: "bg-violet-50 dark:bg-violet-900/20",
+  },
 };
 
 export const formatFileSize = (bytes: number): string => {
@@ -115,6 +140,8 @@ export const documents: Document[] = [
     folder: "Project Planning",
     tags: ["requirements", "planning", "important"],
     isStarred: true,
+    visibility: "team",
+    visibleToPersonIds: [],
     description:
       "Detailed project requirements and specifications for the Q1 initiative.",
   },
@@ -129,6 +156,8 @@ export const documents: Document[] = [
     folder: "Design",
     tags: ["design", "guidelines", "ui"],
     isStarred: false,
+    visibility: "team",
+    visibleToPersonIds: [],
     thumbnail:
       "https://res.cloudinary.com/ds574fco0/image/upload/v1753698766/mock/4_qvrdhf.jpg",
     description:
@@ -145,6 +174,8 @@ export const documents: Document[] = [
     folder: "Finance",
     tags: ["budget", "analysis", "q1"],
     isStarred: true,
+    visibility: "team",
+    visibleToPersonIds: [],
     description: "Comprehensive budget analysis and projections for Q1 2024.",
   },
   {
@@ -158,6 +189,8 @@ export const documents: Document[] = [
     folder: "Presentations",
     tags: ["presentation", "team", "meeting"],
     isStarred: false,
+    visibility: "team",
+    visibleToPersonIds: [],
     description:
       "Monthly team presentation covering progress and upcoming milestones.",
   },
@@ -172,6 +205,8 @@ export const documents: Document[] = [
     folder: "Development",
     tags: ["api", "documentation", "technical"],
     isStarred: false,
+    visibility: "team",
+    visibleToPersonIds: [],
     description:
       "Complete API documentation with endpoints, parameters, and examples.",
   },
@@ -186,6 +221,8 @@ export const documents: Document[] = [
     folder: "Research",
     tags: ["research", "users", "insights"],
     isStarred: true,
+    visibility: "team",
+    visibleToPersonIds: [],
     description:
       "Key findings from user research sessions and usability testing.",
   },
@@ -200,6 +237,8 @@ export const documents: Document[] = [
     folder: "Marketing",
     tags: ["demo", "video", "product"],
     isStarred: false,
+    visibility: "team",
+    visibleToPersonIds: [],
     thumbnail:
       "https://res.cloudinary.com/ds574fco0/image/upload/v1753698766/mock/1_wtodgu.jpg",
     description:
@@ -216,6 +255,8 @@ export const documents: Document[] = [
     folder: "Design",
     tags: ["brand", "assets", "logos"],
     isStarred: false,
+    visibility: "team",
+    visibleToPersonIds: [],
     description:
       "Complete brand asset package including logos, fonts, and guidelines.",
   },
@@ -230,6 +271,8 @@ export const documents: Document[] = [
     folder: "Meetings",
     tags: ["notes", "meeting", "action-items"],
     isStarred: false,
+    visibility: "team",
+    visibleToPersonIds: [],
     description:
       "Notes from the weekly team meeting with action items and decisions.",
   },
@@ -244,6 +287,8 @@ export const documents: Document[] = [
     folder: "Design",
     tags: ["mockups", "ui", "wireframes"],
     isStarred: true,
+    visibility: "team",
+    visibleToPersonIds: [],
     thumbnail:
       "https://res.cloudinary.com/ds574fco0/image/upload/v1753698766/mock/3_dkb7tc.jpg",
     description: "High-fidelity UI mockups for the new dashboard interface.",
@@ -259,6 +304,8 @@ export const documents: Document[] = [
     folder: "Reports",
     tags: ["performance", "metrics", "analysis"],
     isStarred: false,
+    visibility: "team",
+    visibleToPersonIds: [],
     description:
       "Monthly performance report with key metrics and recommendations.",
   },
@@ -273,6 +320,8 @@ export const documents: Document[] = [
     folder: "Client Work",
     tags: ["feedback", "client", "review"],
     isStarred: false,
+    visibility: "team",
+    visibleToPersonIds: [],
     description: "Compiled client feedback from recent project deliverables.",
   },
 ];

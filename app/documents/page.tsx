@@ -4,6 +4,7 @@ import type React from "react"
 
 import { useState, useRef, useEffect } from "react"
 import { useDirectory } from "@/components/directory-provider"
+import { useAuth } from "@/components/auth-provider"
 import { toast } from "@/components/ui/use-toast"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -12,7 +13,8 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Card, CardContent } from "@/components/ui/card"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
-import { documentTypes, formatFileSize, formatDate, type Document } from "@/lib/documents"
+import { documentTypes, formatFileSize, formatDate, type Document, type Folder } from "@/lib/documents"
+import type { UserAccount } from "@/lib/auth"
 import {
     Search,
     Filter,
@@ -20,32 +22,73 @@ import {
     List,
     Upload,
     FolderPlus,
+    FolderOpen,
+    Folder as FolderIcon,
     ChevronDown,
+    ChevronLeft,
     Star,
     StarOff,
-    Download,
-    Share,
     Trash2,
     Edit,
-    Copy,
     Move,
     Eye,
     FileText,
     Tag,
     MoreHorizontal,
+    Link,
+    Image,
+    Globe,
+    Store,
+    Building2,
+    X,
+    Plus,
 } from "lucide-react"
 
 type SortBy = "name" | "date" | "size" | "type" | "owner"
 type GroupBy = "none" | "type" | "date" | "owner" | "folder"
 type ViewMode = "grid" | "list"
+type DocVisibility = "team" | "office" | "store"
 
 interface ContextMenuPosition {
     x: number
     y: number
 }
 
+interface NewFolderDialogState {
+    open: boolean
+    name: string
+}
+
+interface AddLinkDialogState {
+    open: boolean
+    name: string
+    url: string
+    visibility: DocVisibility
+}
+
+interface AddImageDialogState {
+    open: boolean
+    name: string
+    url: string
+    visibility: DocVisibility
+}
+
+interface VisibilityDialogState {
+    open: boolean
+    docId: string
+    visibility: DocVisibility
+}
+
+function getDefaultVisibility(user: UserAccount | null): DocVisibility {
+    if (user?.role === "ceo" || user?.role === "admin") return "office"
+    return "team"
+}
+
 export default function DocumentsPage() {
     const { people } = useDirectory()
+    const { user } = useAuth()
+    const isLeaderOrAdmin = user?.role === "leader" || user?.role === "admin" || user?.role === "ceo"
+
     const [searchQuery, setSearchQuery] = useState("")
     const [sortBy, setSortBy] = useState<SortBy>("date")
     const [groupBy, setGroupBy] = useState<GroupBy>("none")
@@ -54,164 +97,245 @@ export default function DocumentsPage() {
     const [isDrawerOpen, setIsDrawerOpen] = useState(false)
     const [contextMenu, setContextMenu] = useState<{ document: Document; position: ContextMenuPosition } | null>(null)
     const [documentsData, setDocumentsData] = useState<Document[]>([])
+    const [folders, setFolders] = useState<Folder[]>([])
+    const [activeFolderId, setActiveFolderId] = useState<string | null>(null)
+    const [newFolderDialog, setNewFolderDialog] = useState<NewFolderDialogState>({ open: false, name: "" })
+    const [addLinkDialog, setAddLinkDialog] = useState<AddLinkDialogState>({
+        open: false, name: "", url: "", visibility: getDefaultVisibility(user)
+    })
+    const [addImageDialog, setAddImageDialog] = useState<AddImageDialogState>({
+        open: false, name: "", url: "", visibility: getDefaultVisibility(user)
+    })
+    const [visibilityDialog, setVisibilityDialog] = useState<VisibilityDialogState>({
+        open: false, docId: "", visibility: getDefaultVisibility(user)
+    })
+    const [isSubmitting, setIsSubmitting] = useState(false)
+
     const contextMenuRef = useRef<HTMLDivElement>(null)
     const uploadInputRef = useRef<HTMLInputElement>(null)
 
-    // Close context menu when clicking outside
+    const activeFolder = folders.find((f) => f.id === activeFolderId) ?? null
+
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
             if (contextMenuRef.current && !contextMenuRef.current.contains(event.target as Node)) {
                 setContextMenu(null)
             }
         }
-
         document.addEventListener("mousedown", handleClickOutside)
         return () => document.removeEventListener("mousedown", handleClickOutside)
     }, [])
 
     useEffect(() => {
-        let isMounted = true
-
+        loadFolders()
         loadDocuments()
-            .then((payload) => {
-                if (isMounted) {
-                    setDocumentsData(payload)
-                }
-            })
-            .catch(() => {
-                if (isMounted) {
-                    setDocumentsData([])
-                }
-            })
-
-        return () => {
-            isMounted = false
-        }
     }, [])
 
+    useEffect(() => {
+        loadDocuments()
+    }, [activeFolderId])
+
+    const loadFolders = async () => {
+        try {
+            const res = await fetch("/api/documents/folders", { credentials: "include", cache: "no-store" })
+            if (!res.ok) return
+            const payload = (await res.json()) as { folders: Folder[] }
+            setFolders(payload.folders)
+        } catch { /* ignore */ }
+    }
+
     const loadDocuments = async () => {
-        const response = await fetch("/api/documents", {
-            credentials: "include",
-            cache: "no-store",
-        })
-
-        if (!response.ok) {
-            throw new Error("Failed to load documents.")
-        }
-
-        const payload = (await response.json()) as { documents: Document[] }
-        return payload.documents
+        try {
+            const url = activeFolderId
+                ? `/api/documents?folderId=${activeFolderId}`
+                : "/api/documents"
+            const res = await fetch(url, { credentials: "include", cache: "no-store" })
+            if (!res.ok) return
+            const payload = (await res.json()) as { documents: Document[] }
+            setDocumentsData(payload.documents)
+        } catch { /* ignore */ }
     }
 
     const patchDocument = async (documentId: string, updates: Partial<Document>) => {
-        const response = await fetch(`/api/documents/${documentId}`, {
+        const res = await fetch(`/api/documents/${documentId}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             credentials: "include",
             body: JSON.stringify(updates),
         })
-
-        if (!response.ok) {
-            throw new Error("Failed to update document.")
-        }
-
-        const payload = (await response.json()) as { ok: boolean; document: Document }
+        if (!res.ok) throw new Error("Failed to update document.")
+        const payload = (await res.json()) as { ok: boolean; document: Document }
         return payload.document
     }
 
     const inferDocumentType = (fileName: string): Document["type"] => {
-        const extension = fileName.split(".").pop()?.toLowerCase()
-
-        switch (extension) {
-            case "pdf":
-            case "docx":
-            case "xlsx":
-            case "pptx":
-            case "txt":
-            case "jpg":
-            case "png":
-            case "mp4":
-            case "zip":
-                return extension
-            case "fig":
-            case "figma":
-                return "figma"
-            default:
-                return "txt"
+        const ext = fileName.split(".").pop()?.toLowerCase()
+        switch (ext) {
+            case "pdf": case "docx": case "xlsx": case "pptx": case "txt":
+            case "jpg": case "png": case "mp4": case "zip": return ext
+            case "fig": case "figma": return "figma"
+            default: return "txt"
         }
     }
 
-    // Filter documents based on search query
-    const filteredDocuments = documentsData.filter(
-        (doc) =>
-            doc.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            doc.tags.some((tag) => tag.toLowerCase().includes(searchQuery.toLowerCase())) ||
-            doc.folder?.toLowerCase().includes(searchQuery.toLowerCase()),
-    )
+    // ── Folder handlers ──────────────────────────────────────────────
 
-    // Sort documents
-    const sortedDocuments = [...filteredDocuments].sort((a, b) => {
-        switch (sortBy) {
-            case "name":
-                return a.name.localeCompare(b.name)
-            case "date":
-                return new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime()
-            case "size":
-                return b.size - a.size
-            case "type":
-                return a.type.localeCompare(b.type)
-            case "owner":
-                const ownerA = people.find((p) => p.id === a.ownerId)?.name || ""
-                const ownerB = people.find((p) => p.id === b.ownerId)?.name || ""
-                return ownerA.localeCompare(ownerB)
-            default:
-                return 0
+    const handleCreateFolder = async () => {
+        if (!newFolderDialog.name.trim()) return
+        setIsSubmitting(true)
+        try {
+            const res = await fetch("/api/documents/folders", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({ name: newFolderDialog.name.trim() }),
+            })
+            const payload = (await res.json()) as { ok: boolean; folder: Folder }
+            if (!res.ok) throw new Error(payload.folder as unknown as string)
+            setFolders((prev) => [payload.folder, ...prev])
+            setNewFolderDialog({ open: false, name: "" })
+            toast({ title: "Tạo folder thành công" })
+        } catch {
+            toast({ title: "Không thể tạo folder", variant: "destructive" })
+        } finally {
+            setIsSubmitting(false)
         }
-    })
-
-    // Group documents
-    const groupedDocuments = () => {
-        if (groupBy === "none") {
-            return { "All Documents": sortedDocuments }
-        }
-
-        const groups: Record<string, Document[]> = {}
-
-        sortedDocuments.forEach((doc) => {
-            let groupKey = ""
-
-            switch (groupBy) {
-                case "type":
-                    groupKey = doc.type.toUpperCase()
-                    break
-                case "date":
-                    const date = new Date(doc.modifiedAt)
-                    const today = new Date()
-                    const diffTime = Math.abs(today.getTime() - date.getTime())
-                    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24))
-
-                    if (diffDays <= 1) groupKey = "Today"
-                    else if (diffDays <= 7) groupKey = "This Week"
-                    else if (diffDays <= 30) groupKey = "This Month"
-                    else groupKey = "Older"
-                    break
-                case "owner":
-                    const owner = people.find((p) => p.id === doc.ownerId)
-                    groupKey = owner?.name || "Unknown"
-                    break
-                case "folder":
-                    groupKey = doc.folder || "No Folder"
-                    break
-            }
-
-            if (!groups[groupKey]) {
-                groups[groupKey] = []
-            }
-            groups[groupKey].push(doc)
-        })
-
-        return groups
     }
+
+    const handleDeleteFolder = async (folderId: string) => {
+        if (!confirm("Xóa folder này? Các file bên trong sẽ không bị xóa.")) return
+        try {
+            await fetch(`/api/documents/folders/${folderId}`, { method: "DELETE", credentials: "include" })
+            setFolders((prev) => prev.filter((f) => f.id !== folderId))
+            if (activeFolderId === folderId) {
+                setActiveFolderId(null)
+                await loadDocuments()
+            }
+            toast({ title: "Đã xóa folder" })
+        } catch {
+            toast({ title: "Không thể xóa folder", variant: "destructive" })
+        }
+    }
+
+    // ── Add Link handler ─────────────────────────────────────────────
+
+    const handleAddLink = async () => {
+        if (!addLinkDialog.name.trim() || !addLinkDialog.url.trim()) return
+        setIsSubmitting(true)
+        try {
+            const res = await fetch("/api/documents", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({
+                    name: addLinkDialog.name.trim(),
+                    type: "link",
+                    size: 0,
+                    url: addLinkDialog.url.trim(),
+                    folderId: activeFolderId ?? undefined,
+                    tags: ["link"],
+                    visibility: addLinkDialog.visibility,
+                    visibleToPersonIds: [],
+                }),
+            })
+            const payload = (await res.json()) as { ok: boolean; document: Document }
+            if (!res.ok) throw new Error()
+            setDocumentsData((prev) => [payload.document, ...prev])
+            setAddLinkDialog({ open: false, name: "", url: "", visibility: getDefaultVisibility(user) })
+            toast({ title: "Đã thêm link" })
+        } catch {
+            toast({ title: "Không thể thêm link", variant: "destructive" })
+        } finally {
+            setIsSubmitting(false)
+        }
+    }
+
+    // ── Add Image handler ────────────────────────────────────────────
+
+    const handleAddImage = async () => {
+        if (!addImageDialog.name.trim() || !addImageDialog.url.trim()) return
+        setIsSubmitting(true)
+        try {
+            const res = await fetch("/api/documents", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({
+                    name: addImageDialog.name.trim(),
+                    type: "image",
+                    size: 0,
+                    thumbnail: addImageDialog.url.trim(),
+                    folderId: activeFolderId ?? undefined,
+                    tags: ["image"],
+                    visibility: addImageDialog.visibility,
+                    visibleToPersonIds: [],
+                }),
+            })
+            const payload = (await res.json()) as { ok: boolean; document: Document }
+            if (!res.ok) throw new Error()
+            setDocumentsData((prev) => [payload.document, ...prev])
+            setAddImageDialog({ open: false, name: "", url: "", visibility: getDefaultVisibility(user) })
+            toast({ title: "Đã thêm hình ảnh" })
+        } catch {
+            toast({ title: "Không thể thêm hình ảnh", variant: "destructive" })
+        } finally {
+            setIsSubmitting(false)
+        }
+    }
+
+    // ── Upload handler ───────────────────────────────────────────────
+
+    const handleUploadDocuments = async (files: FileList | null) => {
+        if (!files || files.length === 0) return
+        const defaultVis = getDefaultVisibility(user)
+        try {
+            const created = await Promise.all(
+                Array.from(files).map(async (file) => {
+                    const res = await fetch("/api/documents", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        credentials: "include",
+                        body: JSON.stringify({
+                            name: file.name,
+                            type: inferDocumentType(file.name),
+                            size: file.size,
+                            folderId: activeFolderId ?? undefined,
+                            tags: ["uploaded"],
+                            visibility: defaultVis,
+                            visibleToPersonIds: [],
+                            description: `Uploaded on ${new Date().toLocaleDateString("vi-VN")}`,
+                        }),
+                    })
+                    if (!res.ok) throw new Error()
+                    const payload = (await res.json()) as { ok: boolean; document: Document }
+                    return payload.document
+                })
+            )
+            setDocumentsData((prev) => [...created, ...prev])
+            toast({ title: "Upload thành công", description: `Đã thêm ${created.length} file.` })
+        } catch {
+            toast({ title: "Upload thất bại", variant: "destructive" })
+        }
+    }
+
+    // ── Visibility handler ───────────────────────────────────────────
+
+    const handleSaveVisibility = async () => {
+        try {
+            const updated = await patchDocument(visibilityDialog.docId, {
+                visibility: visibilityDialog.visibility,
+                visibleToPersonIds: [],
+            })
+            setDocumentsData((prev) => prev.map((d) => (d.id === updated.id ? updated : d)))
+            if (selectedDocument?.id === updated.id) setSelectedDocument(updated)
+            setVisibilityDialog({ open: false, docId: "", visibility: getDefaultVisibility(user) })
+            toast({ title: "Đã cập nhật quyền xem" })
+        } catch {
+            toast({ title: "Không thể cập nhật quyền xem", variant: "destructive" })
+        }
+    }
+
+    // ── Document handlers ────────────────────────────────────────────
 
     const handleDocumentClick = (doc: Document) => {
         setSelectedDocument(doc)
@@ -220,151 +344,135 @@ export default function DocumentsPage() {
 
     const handleContextMenu = (e: React.MouseEvent, doc: Document) => {
         e.preventDefault()
-        setContextMenu({
-            document: doc,
-            position: { x: e.clientX, y: e.clientY },
-        })
+        setContextMenu({ document: doc, position: { x: e.clientX, y: e.clientY } })
     }
 
     const handleStarToggle = async (docId: string) => {
-        const targetDocument = documentsData.find((doc) => doc.id === docId)
-        if (!targetDocument) {
-            return
-        }
-
+        const target = documentsData.find((d) => d.id === docId)
+        if (!target) return
         try {
-            const updatedDocument = await patchDocument(docId, { isStarred: !targetDocument.isStarred })
-            setDocumentsData((prev) => prev.map((doc) => (doc.id === docId ? updatedDocument : doc)))
-            if (selectedDocument?.id === docId) {
-                setSelectedDocument(updatedDocument)
-            }
+            const updated = await patchDocument(docId, { isStarred: !target.isStarred })
+            setDocumentsData((prev) => prev.map((d) => (d.id === docId ? updated : d)))
+            if (selectedDocument?.id === docId) setSelectedDocument(updated)
         } catch {
-            toast({
-                title: "Không thể cập nhật document",
-                description: "Thao tác star chưa được lưu xuống server.",
-                variant: "destructive",
-            })
+            toast({ title: "Không thể cập nhật", variant: "destructive" })
         }
     }
 
     const handleDeleteDocument = async (docId: string) => {
         try {
-            const response = await fetch(`/api/documents/${docId}`, {
-                method: "DELETE",
-                credentials: "include",
-            })
-
-            if (!response.ok) {
-                throw new Error("Failed to delete document.")
-            }
-
-            setDocumentsData((prev) => prev.filter((doc) => doc.id !== docId))
+            await fetch(`/api/documents/${docId}`, { method: "DELETE", credentials: "include" })
+            setDocumentsData((prev) => prev.filter((d) => d.id !== docId))
             setContextMenu(null)
-            if (selectedDocument?.id === docId) {
-                setSelectedDocument(null)
-                setIsDrawerOpen(false)
-            }
+            if (selectedDocument?.id === docId) { setSelectedDocument(null); setIsDrawerOpen(false) }
         } catch {
-            toast({
-                title: "Không thể xóa document",
-                description: "Bạn không có quyền xóa file này hoặc server từ chối yêu cầu.",
-                variant: "destructive",
-            })
+            toast({ title: "Không thể xóa file", variant: "destructive" })
         }
     }
 
     const handleRenameDocument = async (doc: Document) => {
-        const nextName = window.prompt("Nhập tên mới cho document", doc.name)?.trim()
-        if (!nextName || nextName === doc.name) {
-            return
-        }
-
+        const next = window.prompt("Nhập tên mới", doc.name)?.trim()
+        if (!next || next === doc.name) return
         try {
-            const updatedDocument = await patchDocument(doc.id, { name: nextName })
-            setDocumentsData((prev) => prev.map((item) => (item.id === doc.id ? updatedDocument : item)))
+            const updated = await patchDocument(doc.id, { name: next })
+            setDocumentsData((prev) => prev.map((d) => (d.id === doc.id ? updated : d)))
             setContextMenu(null)
-            if (selectedDocument?.id === doc.id) {
-                setSelectedDocument(updatedDocument)
-            }
+            if (selectedDocument?.id === doc.id) setSelectedDocument(updated)
         } catch {
-            toast({
-                title: "Không thể đổi tên document",
-                description: "Server không chấp nhận cập nhật này.",
-                variant: "destructive",
-            })
+            toast({ title: "Không thể đổi tên", variant: "destructive" })
         }
     }
 
     const handleMoveDocument = async (doc: Document) => {
-        const nextFolder = window.prompt("Nhập tên folder mới", doc.folder ?? "")?.trim()
-        if (nextFolder === undefined) {
-            return
-        }
-
+        const next = window.prompt("Nhập tên folder mới", doc.folder ?? "")?.trim()
+        if (next === undefined) return
         try {
-            const updatedDocument = await patchDocument(doc.id, { folder: nextFolder || undefined })
-            setDocumentsData((prev) => prev.map((item) => (item.id === doc.id ? updatedDocument : item)))
+            const updated = await patchDocument(doc.id, { folder: next || undefined })
+            setDocumentsData((prev) => prev.map((d) => (d.id === doc.id ? updated : d)))
             setContextMenu(null)
-            if (selectedDocument?.id === doc.id) {
-                setSelectedDocument(updatedDocument)
-            }
+            if (selectedDocument?.id === doc.id) setSelectedDocument(updated)
         } catch {
-            toast({
-                title: "Không thể di chuyển document",
-                description: "Server không chấp nhận cập nhật folder.",
-                variant: "destructive",
-            })
+            toast({ title: "Không thể di chuyển", variant: "destructive" })
         }
     }
 
-    const handleUploadDocuments = async (files: FileList | null) => {
-        if (!files || files.length === 0) {
-            return
+    // ── Filtering & sorting ──────────────────────────────────────────
+
+    const filteredDocuments = documentsData.filter(
+        (doc) =>
+            doc.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            doc.tags.some((t) => t.toLowerCase().includes(searchQuery.toLowerCase())) ||
+            doc.folder?.toLowerCase().includes(searchQuery.toLowerCase())
+    )
+
+    const sortedDocuments = [...filteredDocuments].sort((a, b) => {
+        switch (sortBy) {
+            case "name": return a.name.localeCompare(b.name)
+            case "date": return new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime()
+            case "size": return b.size - a.size
+            case "type": return a.type.localeCompare(b.type)
+            case "owner": {
+                const na = people.find((p) => p.id === a.ownerId)?.name || ""
+                const nb = people.find((p) => p.id === b.ownerId)?.name || ""
+                return na.localeCompare(nb)
+            }
+            default: return 0
         }
+    })
 
-        try {
-            const createdDocuments = await Promise.all(
-                Array.from(files).map(async (file) => {
-                    const response = await fetch("/api/documents", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        credentials: "include",
-                        body: JSON.stringify({
-                            name: file.name,
-                            type: inferDocumentType(file.name),
-                            size: file.size,
-                            folder: "Uploads",
-                            tags: ["uploaded"],
-                            description: `Uploaded from local client on ${new Date().toLocaleDateString("vi-VN")}`,
-                        }),
-                    })
+    const groupedDocuments = () => {
+        if (groupBy === "none") return { "Tất cả": sortedDocuments }
+        const groups: Record<string, Document[]> = {}
+        sortedDocuments.forEach((doc) => {
+            let key = ""
+            switch (groupBy) {
+                case "type": key = doc.type.toUpperCase(); break
+                case "date": {
+                    const diff = Math.ceil(Math.abs(Date.now() - new Date(doc.modifiedAt).getTime()) / 86400000)
+                    key = diff <= 1 ? "Hôm nay" : diff <= 7 ? "Tuần này" : diff <= 30 ? "Tháng này" : "Cũ hơn"
+                    break
+                }
+                case "owner": key = people.find((p) => p.id === doc.ownerId)?.name || "Không rõ"; break
+                case "folder": key = doc.folder || "Chưa có folder"; break
+            }
+            if (!groups[key]) groups[key] = []
+            groups[key].push(doc)
+        })
+        return groups
+    }
 
-                    if (!response.ok) {
-                        throw new Error("Failed to create document.")
-                    }
+    const groups = groupedDocuments()
 
-                    const payload = (await response.json()) as { ok: boolean; document: Document }
-                    return payload.document
-                }),
+    // ── Sub-components ───────────────────────────────────────────────
+
+    const VisibilityBadge = ({ doc }: { doc: Document }) => {
+        if (doc.visibility === "store") {
+            return (
+                <span className="inline-flex items-center gap-1 text-xs text-teal-600 dark:text-teal-400">
+                    <Store className="w-3 h-3" />
+                    Cửa hàng
+                </span>
             )
-
-            setDocumentsData((prev) => [...createdDocuments, ...prev])
-            toast({
-                title: "Upload thành công",
-                description: `Đã tạo ${createdDocuments.length} document mới trong MongoDB.`,
-            })
-        } catch {
-            toast({
-                title: "Upload thất bại",
-                description: "Không thể lưu document mới xuống server.",
-                variant: "destructive",
-            })
         }
+        if (doc.visibility === "office") {
+            return (
+                <span className="inline-flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400">
+                    <Building2 className="w-3 h-3" />
+                    Văn phòng
+                </span>
+            )
+        }
+        return (
+            <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
+                <Globe className="w-3 h-3" />
+                Phòng ban
+            </span>
+        )
     }
 
     const DocumentCard = ({ doc }: { doc: Document }) => {
         const owner = people.find((p) => p.id === doc.ownerId)
-        const docType = documentTypes[doc.type]
+        const docType = documentTypes[doc.type] ?? documentTypes.txt
 
         return (
             <Card
@@ -374,76 +482,48 @@ export default function DocumentsPage() {
             >
                 <CardContent className="p-4">
                     <div className="flex items-start justify-between mb-3">
-                        <div className={`w-12 h-12 rounded-lg ${docType.bgColor} flex items-center justify-center text-2xl`}>
+                        <div className={`w-12 h-12 rounded-lg ${docType.bgColor} flex items-center justify-center text-2xl overflow-hidden`}>
                             {doc.thumbnail ? (
-                                <img
-                                    src={doc.thumbnail || "/placeholder.svg"}
-                                    alt={doc.name}
-                                    className="w-full h-full object-cover rounded-lg"
-                                />
+                                <img src={doc.thumbnail} alt={doc.name} className="w-full h-full object-cover rounded-lg" />
+                            ) : doc.type === "link" ? (
+                                <Link className="w-6 h-6 text-cyan-500" />
                             ) : (
                                 <span>{docType.icon}</span>
                             )}
                         </div>
                         <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-6 w-6"
-                                onClick={(e) => {
-                                    e.stopPropagation()
-                                    handleStarToggle(doc.id)
-                                }}
-                            >
-                                {doc.isStarred ? (
-                                    <Star className="w-3 h-3 text-yellow-500 fill-current" />
-                                ) : (
-                                    <StarOff className="w-3 h-3 text-gray-400" />
-                                )}
+                            <Button variant="ghost" size="icon" className="h-6 w-6"
+                                onClick={(e) => { e.stopPropagation(); void handleStarToggle(doc.id) }}>
+                                {doc.isStarred
+                                    ? <Star className="w-3 h-3 text-yellow-500 fill-current" />
+                                    : <StarOff className="w-3 h-3 text-gray-400" />}
                             </Button>
-                            <Button variant="ghost" size="icon" className="h-6 w-6" onClick={(e) => handleContextMenu(e, doc)}>
+                            <Button variant="ghost" size="icon" className="h-6 w-6"
+                                onClick={(e) => handleContextMenu(e, doc)}>
                                 <MoreHorizontal className="w-3 h-3" />
                             </Button>
                         </div>
                     </div>
-
                     <div className="space-y-2">
                         <h3 className="font-medium text-gray-900 dark:text-white text-sm truncate" title={doc.name}>
                             {doc.name}
                         </h3>
-
+                        {doc.type === "link" && doc.url && (
+                            <p className="text-xs text-cyan-600 dark:text-cyan-400 truncate">{doc.url}</p>
+                        )}
                         <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
                             <span>{formatFileSize(doc.size)}</span>
-                            <span>{formatDate(doc.modifiedAt)}</span>
+                            <VisibilityBadge doc={doc} />
                         </div>
-
                         <div className="flex items-center space-x-2">
                             <Avatar className="w-5 h-5">
                                 <AvatarImage src={owner?.imageURL || "/placeholder.svg"} />
-                                <AvatarFallback className="bg-gray-200 dark:bg-gray-600 text-gray-900 dark:text-white text-xs">
-                                    {owner?.name
-                                        .split(" ")
-                                        .map((n) => n[0])
-                                        .join("") || "U"}
+                                <AvatarFallback className="bg-gray-200 dark:bg-gray-600 text-xs">
+                                    {owner?.name.split(" ").map((n) => n[0]).join("") || "U"}
                                 </AvatarFallback>
                             </Avatar>
                             <span className="text-xs text-gray-500 dark:text-gray-400 truncate">{owner?.name || "Unknown"}</span>
                         </div>
-
-                        {doc.tags.length > 0 && (
-                            <div className="flex flex-wrap gap-1">
-                                {doc.tags.slice(0, 2).map((tag) => (
-                                    <Badge key={tag} variant="secondary" className="text-xs px-1 py-0">
-                                        {tag}
-                                    </Badge>
-                                ))}
-                                {doc.tags.length > 2 && (
-                                    <Badge variant="secondary" className="text-xs px-1 py-0">
-                                        +{doc.tags.length - 2}
-                                    </Badge>
-                                )}
-                            </div>
-                        )}
                     </div>
                 </CardContent>
             </Card>
@@ -452,7 +532,7 @@ export default function DocumentsPage() {
 
     const DocumentListItem = ({ doc }: { doc: Document }) => {
         const owner = people.find((p) => p.id === doc.ownerId)
-        const docType = documentTypes[doc.type]
+        const docType = documentTypes[doc.type] ?? documentTypes.txt
 
         return (
             <div
@@ -460,18 +540,15 @@ export default function DocumentsPage() {
                 onDoubleClick={() => handleDocumentClick(doc)}
                 onContextMenu={(e) => handleContextMenu(e, doc)}
             >
-                <div className={`w-10 h-10 rounded-lg ${docType.bgColor} flex items-center justify-center flex-shrink-0`}>
+                <div className={`w-10 h-10 rounded-lg ${docType.bgColor} flex items-center justify-center flex-shrink-0 overflow-hidden`}>
                     {doc.thumbnail ? (
-                        <img
-                            src={doc.thumbnail || "/placeholder.svg"}
-                            alt={doc.name}
-                            className="w-full h-full object-cover rounded-lg"
-                        />
+                        <img src={doc.thumbnail} alt={doc.name} className="w-full h-full object-cover rounded-lg" />
+                    ) : doc.type === "link" ? (
+                        <Link className="w-5 h-5 text-cyan-500" />
                     ) : (
                         <span className="text-lg">{docType.icon}</span>
                     )}
                 </div>
-
                 <div className="flex-1 min-w-0">
                     <div className="flex items-center space-x-2">
                         <h3 className="font-medium text-gray-900 dark:text-white truncate">{doc.name}</h3>
@@ -480,30 +557,19 @@ export default function DocumentsPage() {
                     <div className="flex items-center space-x-4 text-sm text-gray-500 dark:text-gray-400 mt-1">
                         <span>{formatFileSize(doc.size)}</span>
                         <span>{formatDate(doc.modifiedAt)}</span>
-                        <span>{doc.folder}</span>
+                        <VisibilityBadge doc={doc} />
                     </div>
                 </div>
-
                 <div className="flex items-center space-x-3 flex-shrink-0">
-                    <div className="flex items-center space-x-2">
-                        <Avatar className="w-6 h-6">
-                            <AvatarImage src={owner?.imageURL || "/placeholder.svg"} />
-                            <AvatarFallback className="bg-gray-200 dark:bg-gray-600 text-gray-900 dark:text-white text-xs">
-                                {owner?.name
-                                    .split(" ")
-                                    .map((n) => n[0])
-                                    .join("") || "U"}
-                            </AvatarFallback>
-                        </Avatar>
-                        <span className="text-sm text-gray-600 dark:text-gray-300 hidden sm:block">{owner?.name || "Unknown"}</span>
-                    </div>
-
-                    <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
-                        onClick={(e) => handleContextMenu(e, doc)}
-                    >
+                    <Avatar className="w-6 h-6">
+                        <AvatarImage src={owner?.imageURL || "/placeholder.svg"} />
+                        <AvatarFallback className="bg-gray-200 dark:bg-gray-600 text-xs">
+                            {owner?.name.split(" ").map((n) => n[0]).join("") || "U"}
+                        </AvatarFallback>
+                    </Avatar>
+                    <span className="text-sm text-gray-600 dark:text-gray-300 hidden sm:block">{owner?.name || "Unknown"}</span>
+                    <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100"
+                        onClick={(e) => handleContextMenu(e, doc)}>
                         <MoreHorizontal className="w-4 h-4" />
                     </Button>
                 </div>
@@ -511,202 +577,215 @@ export default function DocumentsPage() {
         )
     }
 
-    const groups = groupedDocuments()
+    // ── Render ───────────────────────────────────────────────────────
 
     return (
         <div className="p-6">
             {/* Header */}
             <div className="mb-6">
                 <h1 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">Documents</h1>
-                <p className="text-gray-600 dark:text-gray-400">Manage and organize your project files</p>
+                <p className="text-gray-600 dark:text-gray-400">Quản lý và tổ chức tài liệu của phòng ban</p>
             </div>
+
+            {/* Folders section */}
+            <div className="mb-6">
+                <div className="flex items-center justify-between mb-3">
+                    <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">Folders</h2>
+                    {isLeaderOrAdmin && (
+                        <Button
+                            size="sm"
+                            variant="outline"
+                            className="border-dashed border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-400"
+                            onClick={() => setNewFolderDialog({ open: true, name: "" })}
+                        >
+                            <FolderPlus className="w-4 h-4 mr-1" />
+                            Tạo folder
+                        </Button>
+                    )}
+                </div>
+
+                {folders.length === 0 ? (
+                    <p className="text-sm text-gray-400 dark:text-gray-500 italic">
+                        {isLeaderOrAdmin ? "Chưa có folder nào. Tạo folder đầu tiên." : "Chưa có folder nào."}
+                    </p>
+                ) : (
+                    <div className="flex flex-wrap gap-3">
+                        {folders.map((folder) => (
+                            <div
+                                key={folder.id}
+                                className={`group flex items-center gap-2 px-4 py-2.5 rounded-xl border cursor-pointer transition-all ${
+                                    activeFolderId === folder.id
+                                        ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300"
+                                        : "border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 hover:border-blue-400 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 text-gray-700 dark:text-gray-300"
+                                }`}
+                                onClick={() => setActiveFolderId(activeFolderId === folder.id ? null : folder.id)}
+                            >
+                                {activeFolderId === folder.id
+                                    ? <FolderOpen className="w-4 h-4" />
+                                    : <FolderIcon className="w-4 h-4" />}
+                                <span className="text-sm font-medium">{folder.name}</span>
+                                {isLeaderOrAdmin && (
+                                    <button
+                                        className="ml-1 opacity-0 group-hover:opacity-100 transition-opacity text-gray-400 hover:text-red-500"
+                                        onClick={(e) => { e.stopPropagation(); void handleDeleteFolder(folder.id) }}
+                                    >
+                                        <X className="w-3 h-3" />
+                                    </button>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {/* Active folder bar */}
+            {activeFolderId && (
+                <div className="flex items-center gap-2 mb-4 px-3 py-2 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-700">
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-blue-600 dark:text-blue-400 h-7 px-2"
+                        onClick={() => setActiveFolderId(null)}
+                    >
+                        <ChevronLeft className="w-4 h-4 mr-1" />
+                        Tất cả
+                    </Button>
+                    <span className="text-sm text-blue-700 dark:text-blue-300 font-medium">/ {activeFolder?.name}</span>
+
+                    {/* Actions inside folder — leader/admin only */}
+                    {isLeaderOrAdmin && (
+                        <div className="ml-auto flex gap-2">
+                            <input
+                                ref={uploadInputRef}
+                                type="file"
+                                multiple
+                                className="hidden"
+                                onChange={(e) => { void handleUploadDocuments(e.target.files); e.target.value = "" }}
+                            />
+                            <Button size="sm" variant="outline"
+                                className="border-blue-300 text-blue-700 dark:text-blue-300 bg-transparent"
+                                onClick={() => uploadInputRef.current?.click()}>
+                                <Upload className="w-3.5 h-3.5 mr-1" />
+                                Upload
+                            </Button>
+                            <Button size="sm" variant="outline"
+                                className="border-blue-300 text-blue-700 dark:text-blue-300 bg-transparent"
+                                onClick={() => setAddLinkDialog({ open: true, name: "", url: "", visibility: getDefaultVisibility(user) })}>
+                                <Link className="w-3.5 h-3.5 mr-1" />
+                                Thêm link
+                            </Button>
+                            <Button size="sm" variant="outline"
+                                className="border-blue-300 text-blue-700 dark:text-blue-300 bg-transparent"
+                                onClick={() => setAddImageDialog({ open: true, name: "", url: "", visibility: getDefaultVisibility(user) })}>
+                                <Image className="w-3.5 h-3.5 mr-1" />
+                                Thêm ảnh
+                            </Button>
+                        </div>
+                    )}
+                </div>
+            )}
 
             {/* Controls */}
             <div className="flex flex-col sm:flex-row gap-4 mb-6">
                 <div className="flex-1">
                     <div className="relative">
-                        <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 dark:text-gray-500 w-4 h-4" />
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-4 h-4" />
                         <Input
-                            placeholder="Search documents, tags, or folders..."
+                            placeholder="Tìm kiếm tài liệu, tags..."
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
-                            className="pl-10 bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-white"
+                            className="pl-10 bg-white dark:bg-gray-700"
                         />
                     </div>
                 </div>
 
                 <div className="flex items-center space-x-2">
-                    {/* Sort By */}
                     <DropdownMenu>
                         <DropdownMenuTrigger asChild>
-                            <Button
-                                variant="outline"
-                                className="border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 bg-transparent"
-                            >
+                            <Button variant="outline" className="bg-transparent">
                                 Sort: {sortBy.charAt(0).toUpperCase() + sortBy.slice(1)}
                                 <ChevronDown className="w-4 h-4 ml-2" />
                             </Button>
                         </DropdownMenuTrigger>
-                        <DropdownMenuContent className="bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700">
-                            <DropdownMenuItem
-                                onClick={() => setSortBy("name")}
-                                className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700"
-                            >
-                                Name
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                                onClick={() => setSortBy("date")}
-                                className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700"
-                            >
-                                Date Modified
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                                onClick={() => setSortBy("size")}
-                                className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700"
-                            >
-                                Size
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                                onClick={() => setSortBy("type")}
-                                className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700"
-                            >
-                                Type
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                                onClick={() => setSortBy("owner")}
-                                className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700"
-                            >
-                                Owner
-                            </DropdownMenuItem>
+                        <DropdownMenuContent>
+                            {(["name", "date", "size", "type", "owner"] as SortBy[]).map((s) => (
+                                <DropdownMenuItem key={s} onClick={() => setSortBy(s)}>
+                                    {s.charAt(0).toUpperCase() + s.slice(1)}
+                                </DropdownMenuItem>
+                            ))}
                         </DropdownMenuContent>
                     </DropdownMenu>
 
-                    {/* Group By */}
                     <DropdownMenu>
                         <DropdownMenuTrigger asChild>
-                            <Button
-                                variant="outline"
-                                className="border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 bg-transparent"
-                            >
+                            <Button variant="outline" className="bg-transparent">
                                 <Filter className="w-4 h-4 mr-2" />
                                 Group: {groupBy === "none" ? "None" : groupBy.charAt(0).toUpperCase() + groupBy.slice(1)}
                                 <ChevronDown className="w-4 h-4 ml-2" />
                             </Button>
                         </DropdownMenuTrigger>
-                        <DropdownMenuContent className="bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700">
-                            <DropdownMenuItem
-                                onClick={() => setGroupBy("none")}
-                                className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700"
-                            >
-                                None
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                                onClick={() => setGroupBy("type")}
-                                className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700"
-                            >
-                                Type
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                                onClick={() => setGroupBy("date")}
-                                className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700"
-                            >
-                                Date
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                                onClick={() => setGroupBy("owner")}
-                                className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700"
-                            >
-                                Owner
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                                onClick={() => setGroupBy("folder")}
-                                className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700"
-                            >
-                                Folder
-                            </DropdownMenuItem>
+                        <DropdownMenuContent>
+                            {(["none", "type", "date", "owner", "folder"] as GroupBy[]).map((g) => (
+                                <DropdownMenuItem key={g} onClick={() => setGroupBy(g)}>
+                                    {g === "none" ? "None" : g.charAt(0).toUpperCase() + g.slice(1)}
+                                </DropdownMenuItem>
+                            ))}
                         </DropdownMenuContent>
                     </DropdownMenu>
 
-                    {/* View Mode */}
-                    <div className="flex items-center border border-gray-300 dark:border-gray-600 rounded-lg p-1 bg-white dark:bg-gray-800">
-                        <Button
-                            variant={viewMode === "grid" ? "default" : "ghost"}
-                            size="sm"
-                            onClick={() => setViewMode("grid")}
-                            className="h-8 px-3"
-                        >
+                    <div className="flex items-center border rounded-lg p-1 bg-white dark:bg-gray-800">
+                        <Button variant={viewMode === "grid" ? "default" : "ghost"} size="sm" onClick={() => setViewMode("grid")} className="h-8 px-3">
                             <Grid3X3 className="w-4 h-4" />
                         </Button>
-                        <Button
-                            variant={viewMode === "list" ? "default" : "ghost"}
-                            size="sm"
-                            onClick={() => setViewMode("list")}
-                            className="h-8 px-3"
-                        >
+                        <Button variant={viewMode === "list" ? "default" : "ghost"} size="sm" onClick={() => setViewMode("list")} className="h-8 px-3">
                             <List className="w-4 h-4" />
                         </Button>
                     </div>
 
-                    {/* Action Buttons */}
-                    <input
-                        ref={uploadInputRef}
-                        type="file"
-                        multiple
-                        className="hidden"
-                        onChange={(event) => {
-                            handleUploadDocuments(event.target.files)
-                            event.target.value = ""
-                        }}
-                    />
-                    <Button
-                        className="bg-blue-600 hover:bg-blue-700 dark:bg-blue-700 dark:hover:bg-blue-800"
-                        onClick={() => uploadInputRef.current?.click()}
-                    >
-                        <Upload className="w-4 h-4 mr-2" />
-                        Upload
-                    </Button>
-
-                    <Button
-                        variant="outline"
-                        className="border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 bg-transparent"
-                    >
-                        <FolderPlus className="w-4 h-4 mr-2" />
-                        New Folder
-                    </Button>
+                    {/* Upload outside folder — leader/admin only */}
+                    {!activeFolderId && isLeaderOrAdmin && (
+                        <>
+                            <input
+                                ref={uploadInputRef}
+                                type="file"
+                                multiple
+                                className="hidden"
+                                onChange={(e) => { void handleUploadDocuments(e.target.files); e.target.value = "" }}
+                            />
+                            <Button className="bg-blue-600 hover:bg-blue-700" onClick={() => uploadInputRef.current?.click()}>
+                                <Upload className="w-4 h-4 mr-2" />
+                                Upload
+                            </Button>
+                        </>
+                    )}
                 </div>
             </div>
 
-            {/* Results Count */}
+            {/* Results count */}
             <div className="mb-4">
                 <p className="text-sm text-gray-600 dark:text-gray-400">
-                    Showing {filteredDocuments.length} of {documentsData.length} documents
+                    {filteredDocuments.length} / {documentsData.length} tài liệu
+                    {activeFolder ? ` trong "${activeFolder.name}"` : ""}
                 </p>
             </div>
 
-            {/* Document Groups */}
+            {/* Document list */}
             <div className="space-y-8">
                 {Object.entries(groups).map(([groupName, groupDocs]) => (
                     <div key={groupName}>
                         {groupBy !== "none" && (
                             <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center">
                                 {groupName}
-                                <Badge variant="secondary" className="ml-2">
-                                    {groupDocs.length}
-                                </Badge>
+                                <Badge variant="secondary" className="ml-2">{groupDocs.length}</Badge>
                             </h2>
                         )}
-
                         {viewMode === "grid" ? (
                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                                {groupDocs.map((doc) => (
-                                    <DocumentCard key={doc.id} doc={doc} />
-                                ))}
+                                {groupDocs.map((doc) => <DocumentCard key={doc.id} doc={doc} />)}
                             </div>
                         ) : (
                             <div className="space-y-1">
-                                {groupDocs.map((doc) => (
-                                    <DocumentListItem key={doc.id} doc={doc} />
-                                ))}
+                                {groupDocs.map((doc) => <DocumentListItem key={doc.id} doc={doc} />)}
                             </div>
                         )}
                     </div>
@@ -715,285 +794,360 @@ export default function DocumentsPage() {
 
             {filteredDocuments.length === 0 && (
                 <div className="text-center py-12">
-                    <FileText className="w-12 h-12 mx-auto mb-4 text-gray-400 dark:text-gray-500" />
-                    <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">No documents found</h3>
-                    <p className="text-gray-600 dark:text-gray-400">Try adjusting your search or filter criteria</p>
+                    <FileText className="w-12 h-12 mx-auto mb-4 text-gray-400" />
+                    <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">Không có tài liệu</h3>
+                    <p className="text-gray-600 dark:text-gray-400">
+                        {activeFolder ? `Folder "${activeFolder.name}" chưa có file nào.` : "Thử thay đổi bộ lọc hoặc tìm kiếm."}
+                    </p>
                 </div>
             )}
 
-            {/* Context Menu */}
+            {/* ── Context Menu ─────────────────────────────────────────── */}
             {contextMenu && (
                 <div
                     ref={contextMenuRef}
-                    className="fixed z-50 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-2 min-w-[160px]"
-                    style={{
-                        left: contextMenu.position.x,
-                        top: contextMenu.position.y,
-                    }}
+                    className="fixed z-50 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-2 min-w-[180px]"
+                    style={{ left: contextMenu.position.x, top: contextMenu.position.y }}
                 >
-                    <button
-                        className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
-                        onClick={() => {
-                            handleDocumentClick(contextMenu.document)
-                            setContextMenu(null)
-                        }}
-                    >
-                        <Eye className="w-4 h-4 mr-2" />
-                        Open
+                    <button className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
+                        onClick={() => { handleDocumentClick(contextMenu.document); setContextMenu(null) }}>
+                        <Eye className="w-4 h-4 mr-2" />Chi tiết
                     </button>
-                    <button
-                        className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
-                        onClick={() => {
-                            console.log("Download", contextMenu.document.name)
-                            setContextMenu(null)
-                        }}
-                    >
-                        <Download className="w-4 h-4 mr-2" />
-                        Download
+                    {contextMenu.document.type === "link" && contextMenu.document.url && (
+                        <button className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
+                            onClick={() => { window.open(contextMenu.document.url, "_blank"); setContextMenu(null) }}>
+                            <Link className="w-4 h-4 mr-2" />Mở link
+                        </button>
+                    )}
+                    <button className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
+                        onClick={() => { void handleStarToggle(contextMenu.document.id); setContextMenu(null) }}>
+                        {contextMenu.document.isStarred ? <><StarOff className="w-4 h-4 mr-2" />Bỏ star</> : <><Star className="w-4 h-4 mr-2" />Star</>}
                     </button>
-                    <button
-                        className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
-                        onClick={() => {
-                            console.log("Share", contextMenu.document.name)
-                            setContextMenu(null)
-                        }}
-                    >
-                        <Share className="w-4 h-4 mr-2" />
-                        Share
-                    </button>
-                    <button
-                        className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
-                        onClick={() => {
-                            void handleStarToggle(contextMenu.document.id)
-                            setContextMenu(null)
-                        }}
-                    >
-                        {contextMenu.document.isStarred ? (
-                            <>
-                                <StarOff className="w-4 h-4 mr-2" />
-                                Remove Star
-                            </>
-                        ) : (
-                            <>
-                                <Star className="w-4 h-4 mr-2" />
-                                Add Star
-                            </>
-                        )}
-                    </button>
-                    <div className="border-t border-gray-200 dark:border-gray-700 my-1" />
-                    <button
-                        className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
-                        onClick={() => {
-                            void handleRenameDocument(contextMenu.document)
-                        }}
-                    >
-                        <Edit className="w-4 h-4 mr-2" />
-                        Rename
-                    </button>
-                    <button
-                        className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
-                        onClick={() => {
-                            console.log("Copy", contextMenu.document.name)
-                            setContextMenu(null)
-                        }}
-                    >
-                        <Copy className="w-4 h-4 mr-2" />
-                        Make a Copy
-                    </button>
-                    <button
-                        className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
-                        onClick={() => {
-                            void handleMoveDocument(contextMenu.document)
-                        }}
-                    >
-                        <Move className="w-4 h-4 mr-2" />
-                        Move to Folder
-                    </button>
-                    <div className="border-t border-gray-200 dark:border-gray-700 my-1" />
-                    <button
-                        className="w-full px-4 py-2 text-left text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center"
-                        onClick={() => void handleDeleteDocument(contextMenu.document.id)}
-                    >
-                        <Trash2 className="w-4 h-4 mr-2" />
-                        Delete
-                    </button>
+                    {isLeaderOrAdmin && (
+                        <button className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
+                            onClick={() => {
+                                const vis = (contextMenu.document.visibility ?? "team") as DocVisibility
+                                setVisibilityDialog({ open: true, docId: contextMenu.document.id, visibility: vis })
+                                setContextMenu(null)
+                            }}>
+                            <Globe className="w-4 h-4 mr-2" />Quyền xem
+                        </button>
+                    )}
+                    {isLeaderOrAdmin && (
+                        <>
+                            <div className="border-t border-gray-200 dark:border-gray-700 my-1" />
+                            <button className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
+                                onClick={() => void handleRenameDocument(contextMenu.document)}>
+                                <Edit className="w-4 h-4 mr-2" />Đổi tên
+                            </button>
+                            <button className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
+                                onClick={() => void handleMoveDocument(contextMenu.document)}>
+                                <Move className="w-4 h-4 mr-2" />Di chuyển
+                            </button>
+                            <div className="border-t border-gray-200 dark:border-gray-700 my-1" />
+                            <button className="w-full px-4 py-2 text-left text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center"
+                                onClick={() => void handleDeleteDocument(contextMenu.document.id)}>
+                                <Trash2 className="w-4 h-4 mr-2" />Xóa
+                            </button>
+                        </>
+                    )}
                 </div>
             )}
 
-            {/* Document Details Drawer */}
+            {/* ── Document Details Drawer ──────────────────────────────── */}
             <Sheet open={isDrawerOpen} onOpenChange={setIsDrawerOpen}>
                 <SheetContent className="w-[400px] sm:w-[540px] bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700">
                     <SheetHeader>
-                        <SheetTitle className="text-gray-900 dark:text-white">Document Details</SheetTitle>
+                        <SheetTitle className="text-gray-900 dark:text-white">Chi tiết tài liệu</SheetTitle>
                     </SheetHeader>
+                    {selectedDocument && (() => {
+                        const docType = documentTypes[selectedDocument.type] ?? documentTypes.txt
+                        const owner = people.find((p) => p.id === selectedDocument.ownerId)
+                        return (
+                            <div className="mt-6 space-y-6">
+                                <div className="space-y-3">
+                                    <h3 className="text-sm font-medium text-gray-900 dark:text-white">Xem trước</h3>
+                                    <div className="w-full h-48 bg-gray-100 dark:bg-gray-700 rounded-lg flex items-center justify-center overflow-hidden">
+                                        {selectedDocument.thumbnail ? (
+                                            <img src={selectedDocument.thumbnail} alt={selectedDocument.name} className="max-w-full max-h-full object-contain rounded-lg" />
+                                        ) : selectedDocument.type === "link" ? (
+                                            <div className="text-center">
+                                                <Link className="w-10 h-10 text-cyan-400 mx-auto mb-2" />
+                                                <a href={selectedDocument.url} target="_blank" rel="noopener noreferrer"
+                                                    className="text-sm text-cyan-600 dark:text-cyan-400 underline break-all px-4">
+                                                    {selectedDocument.url}
+                                                </a>
+                                            </div>
+                                        ) : (
+                                            <div className="text-center">
+                                                <span className="text-4xl mb-2 block">{docType.icon}</span>
+                                                <p className="text-sm text-gray-500 dark:text-gray-400">Không có xem trước</p>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
 
-                    {selectedDocument && (
-                        <div className="mt-6 space-y-6">
-                            {/* Preview */}
-                            <div className="space-y-3">
-                                <h3 className="text-sm font-medium text-gray-900 dark:text-white">Preview</h3>
-                                <div className="w-full h-48 bg-gray-100 dark:bg-gray-700 rounded-lg flex items-center justify-center">
-                                    {selectedDocument.thumbnail ? (
-                                        <img
-                                            src={selectedDocument.thumbnail || "/placeholder.svg"}
-                                            alt={selectedDocument.name}
-                                            className="max-w-full max-h-full object-contain rounded-lg"
-                                        />
-                                    ) : (
-                                        <div className="text-center">
-                                            <span className="text-4xl mb-2 block">{documentTypes[selectedDocument.type].icon}</span>
-                                            <p className="text-sm text-gray-500 dark:text-gray-400">No preview available</p>
+                                <div className="space-y-3">
+                                    <h3 className="text-sm font-medium text-gray-900 dark:text-white">Thông tin file</h3>
+                                    <div className="space-y-2 text-sm">
+                                        <div className="flex justify-between">
+                                            <span className="text-gray-500">Tên</span>
+                                            <span className="text-gray-900 dark:text-white font-medium text-right max-w-[250px] break-words">{selectedDocument.name}</span>
                                         </div>
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-gray-500">Loại</span>
+                                            <Badge className={`${docType.color} bg-transparent border`}>{selectedDocument.type.toUpperCase()}</Badge>
+                                        </div>
+                                        <div className="flex justify-between">
+                                            <span className="text-gray-500">Kích thước</span>
+                                            <span className="text-gray-900 dark:text-white">{formatFileSize(selectedDocument.size)}</span>
+                                        </div>
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-gray-500">Quyền xem</span>
+                                            <VisibilityBadge doc={selectedDocument} />
+                                        </div>
+                                        {selectedDocument.folder && (
+                                            <div className="flex justify-between">
+                                                <span className="text-gray-500">Folder</span>
+                                                <span className="text-gray-900 dark:text-white">{selectedDocument.folder}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div className="space-y-3">
+                                    <h3 className="text-sm font-medium text-gray-900 dark:text-white">Chủ sở hữu</h3>
+                                    <div className="flex items-center space-x-3">
+                                        <Avatar className="w-10 h-10">
+                                            <AvatarImage src={owner?.imageURL || "/placeholder.svg"} />
+                                            <AvatarFallback>{owner?.name.split(" ").map((n) => n[0]).join("") || "U"}</AvatarFallback>
+                                        </Avatar>
+                                        <div>
+                                            <p className="text-sm font-medium text-gray-900 dark:text-white">{owner?.name || "Unknown"}</p>
+                                            <p className="text-xs text-gray-500">{owner?.email || ""}</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-2 text-sm">
+                                    <div className="flex justify-between">
+                                        <span className="text-gray-500">Tạo lúc</span>
+                                        <span className="text-gray-900 dark:text-white">{formatDate(selectedDocument.createdAt)}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                        <span className="text-gray-500">Sửa lúc</span>
+                                        <span className="text-gray-900 dark:text-white">{formatDate(selectedDocument.modifiedAt)}</span>
+                                    </div>
+                                </div>
+
+                                {selectedDocument.tags.length > 0 && (
+                                    <div className="space-y-2">
+                                        <h3 className="text-sm font-medium text-gray-900 dark:text-white">Tags</h3>
+                                        <div className="flex flex-wrap gap-2">
+                                            {selectedDocument.tags.map((tag) => (
+                                                <Badge key={tag} variant="secondary"><Tag className="w-3 h-3 mr-1" />{tag}</Badge>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {selectedDocument.description && (
+                                    <div className="space-y-2">
+                                        <h3 className="text-sm font-medium text-gray-900 dark:text-white">Mô tả</h3>
+                                        <p className="text-sm text-gray-600 dark:text-gray-300">{selectedDocument.description}</p>
+                                    </div>
+                                )}
+
+                                <div className="flex space-x-2 pt-4 border-t border-gray-200 dark:border-gray-700">
+                                    <Button variant="outline" className="flex-1 bg-transparent"
+                                        onClick={() => void handleStarToggle(selectedDocument.id)}>
+                                        {selectedDocument.isStarred ? <><StarOff className="w-4 h-4 mr-2" />Bỏ star</> : <><Star className="w-4 h-4 mr-2" />Star</>}
+                                    </Button>
+                                    {isLeaderOrAdmin && (
+                                        <Button variant="outline" className="flex-1 bg-transparent"
+                                            onClick={() => {
+                                                const vis = (selectedDocument.visibility ?? "team") as DocVisibility
+                                                setVisibilityDialog({ open: true, docId: selectedDocument.id, visibility: vis })
+                                            }}>
+                                            <Globe className="w-4 h-4 mr-2" />Quyền xem
+                                        </Button>
                                     )}
                                 </div>
                             </div>
-
-                            {/* File Info */}
-                            <div className="space-y-4">
-                                <h3 className="text-sm font-medium text-gray-900 dark:text-white">File Information</h3>
-
-                                <div className="space-y-3">
-                                    <div className="flex items-start justify-between">
-                                        <span className="text-sm text-gray-500 dark:text-gray-400">Name</span>
-                                        <span className="text-sm text-gray-900 dark:text-white font-medium text-right max-w-[250px] break-words">
-                                            {selectedDocument.name}
-                                        </span>
-                                    </div>
-
-                                    <div className="flex items-center justify-between">
-                                        <span className="text-sm text-gray-500 dark:text-gray-400">Type</span>
-                                        <Badge className={`${documentTypes[selectedDocument.type].color} bg-transparent border`}>
-                                            {selectedDocument.type.toUpperCase()}
-                                        </Badge>
-                                    </div>
-
-                                    <div className="flex items-center justify-between">
-                                        <span className="text-sm text-gray-500 dark:text-gray-400">Size</span>
-                                        <span className="text-sm text-gray-900 dark:text-white">
-                                            {formatFileSize(selectedDocument.size)}
-                                        </span>
-                                    </div>
-
-                                    <div className="flex items-center justify-between">
-                                        <span className="text-sm text-gray-500 dark:text-gray-400">Folder</span>
-                                        <span className="text-sm text-gray-900 dark:text-white">
-                                            {selectedDocument.folder || "No Folder"}
-                                        </span>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Owner */}
-                            <div className="space-y-3">
-                                <h3 className="text-sm font-medium text-gray-900 dark:text-white">Owner</h3>
-                                <div className="flex items-center space-x-3">
-                                    <Avatar className="w-10 h-10">
-                                        <AvatarImage
-                                            src={people.find((p) => p.id === selectedDocument.ownerId)?.imageURL || "/placeholder.svg"}
-                                        />
-                                        <AvatarFallback className="bg-gray-200 dark:bg-gray-600 text-gray-900 dark:text-white">
-                                            {people
-                                                .find((p) => p.id === selectedDocument.ownerId)
-                                                ?.name.split(" ")
-                                                .map((n) => n[0])
-                                                .join("") || "U"}
-                                        </AvatarFallback>
-                                    </Avatar>
-                                    <div>
-                                        <p className="text-sm font-medium text-gray-900 dark:text-white">
-                                            {people.find((p) => p.id === selectedDocument.ownerId)?.name || "Unknown"}
-                                        </p>
-                                        <p className="text-xs text-gray-500 dark:text-gray-400">
-                                            {people.find((p) => p.id === selectedDocument.ownerId)?.email || "No email"}
-                                        </p>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Dates */}
-                            <div className="space-y-3">
-                                <h3 className="text-sm font-medium text-gray-900 dark:text-white">Dates</h3>
-                                <div className="space-y-2">
-                                    <div className="flex items-center justify-between">
-                                        <span className="text-sm text-gray-500 dark:text-gray-400">Created</span>
-                                        <span className="text-sm text-gray-900 dark:text-white">
-                                            {formatDate(selectedDocument.createdAt)}
-                                        </span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                        <span className="text-sm text-gray-500 dark:text-gray-400">Modified</span>
-                                        <span className="text-sm text-gray-900 dark:text-white">
-                                            {formatDate(selectedDocument.modifiedAt)}
-                                        </span>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Tags */}
-                            {selectedDocument.tags.length > 0 && (
-                                <div className="space-y-3">
-                                    <h3 className="text-sm font-medium text-gray-900 dark:text-white">Tags</h3>
-                                    <div className="flex flex-wrap gap-2">
-                                        {selectedDocument.tags.map((tag) => (
-                                            <Badge key={tag} variant="secondary" className="text-xs">
-                                                <Tag className="w-3 h-3 mr-1" />
-                                                {tag}
-                                            </Badge>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Description */}
-                            {selectedDocument.description && (
-                                <div className="space-y-3">
-                                    <h3 className="text-sm font-medium text-gray-900 dark:text-white">Description</h3>
-                                    <p className="text-sm text-gray-600 dark:text-gray-300 leading-relaxed">
-                                        {selectedDocument.description}
-                                    </p>
-                                </div>
-                            )}
-
-                            {/* Actions */}
-                            <div className="space-y-3 pt-4 border-t border-gray-200 dark:border-gray-700">
-                                <div className="flex space-x-2">
-                                    <Button className="flex-1">
-                                        <Download className="w-4 h-4 mr-2" />
-                                        Download
-                                    </Button>
-                                    <Button variant="outline" className="flex-1 bg-transparent">
-                                        <Share className="w-4 h-4 mr-2" />
-                                        Share
-                                    </Button>
-                                </div>
-                                <div className="flex space-x-2">
-                                    <Button variant="outline" className="flex-1 bg-transparent">
-                                        <Edit className="w-4 h-4 mr-2" />
-                                        Rename
-                                    </Button>
-                                    <Button
-                                        variant="outline"
-                                        className="flex-1 bg-transparent"
-                                        onClick={() => void handleStarToggle(selectedDocument.id)}
-                                    >
-                                        {selectedDocument.isStarred ? (
-                                            <>
-                                                <StarOff className="w-4 h-4 mr-2" />
-                                                Unstar
-                                            </>
-                                        ) : (
-                                            <>
-                                                <Star className="w-4 h-4 mr-2" />
-                                                Star
-                                            </>
-                                        )}
-                                    </Button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
+                        )
+                    })()}
                 </SheetContent>
             </Sheet>
+
+            {/* ── New Folder Dialog ────────────────────────────────────── */}
+            {newFolderDialog.open && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                    <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 w-full max-w-sm shadow-xl">
+                        <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Tạo folder mới</h2>
+                        <Input
+                            autoFocus
+                            placeholder="Tên folder..."
+                            value={newFolderDialog.name}
+                            onChange={(e) => setNewFolderDialog((s) => ({ ...s, name: e.target.value }))}
+                            onKeyDown={(e) => { if (e.key === "Enter") void handleCreateFolder() }}
+                            className="mb-4"
+                        />
+                        <div className="flex gap-2 justify-end">
+                            <Button variant="outline" className="bg-transparent"
+                                onClick={() => setNewFolderDialog({ open: false, name: "" })}>Huỷ</Button>
+                            <Button disabled={!newFolderDialog.name.trim() || isSubmitting}
+                                onClick={() => void handleCreateFolder()}>Tạo</Button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Add Link Dialog ──────────────────────────────────────── */}
+            {addLinkDialog.open && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                    <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 w-full max-w-md shadow-xl space-y-4">
+                        <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Thêm link</h2>
+                        <Input placeholder="Tên hiển thị..." value={addLinkDialog.name}
+                            onChange={(e) => setAddLinkDialog((s) => ({ ...s, name: e.target.value }))} />
+                        <Input placeholder="https://..." value={addLinkDialog.url}
+                            onChange={(e) => setAddLinkDialog((s) => ({ ...s, url: e.target.value }))} />
+                        <VisibilityPicker
+                            user={user}
+                            visibility={addLinkDialog.visibility}
+                            onChange={(v) => setAddLinkDialog((s) => ({ ...s, visibility: v }))}
+                        />
+                        <div className="flex gap-2 justify-end">
+                            <Button variant="outline" className="bg-transparent"
+                                onClick={() => setAddLinkDialog({ open: false, name: "", url: "", visibility: getDefaultVisibility(user) })}>Huỷ</Button>
+                            <Button disabled={!addLinkDialog.name.trim() || !addLinkDialog.url.trim() || isSubmitting}
+                                onClick={() => void handleAddLink()}>Thêm</Button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Add Image Dialog ─────────────────────────────────────── */}
+            {addImageDialog.open && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                    <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 w-full max-w-md shadow-xl space-y-4">
+                        <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Thêm hình ảnh</h2>
+                        <Input placeholder="Tên hình ảnh..." value={addImageDialog.name}
+                            onChange={(e) => setAddImageDialog((s) => ({ ...s, name: e.target.value }))} />
+                        <Input placeholder="URL hình ảnh https://..." value={addImageDialog.url}
+                            onChange={(e) => setAddImageDialog((s) => ({ ...s, url: e.target.value }))} />
+                        {addImageDialog.url && (
+                            <img src={addImageDialog.url} alt="preview" className="w-full h-40 object-cover rounded-lg border" onError={(e) => (e.currentTarget.style.display = "none")} />
+                        )}
+                        <VisibilityPicker
+                            user={user}
+                            visibility={addImageDialog.visibility}
+                            onChange={(v) => setAddImageDialog((s) => ({ ...s, visibility: v }))}
+                        />
+                        <div className="flex gap-2 justify-end">
+                            <Button variant="outline" className="bg-transparent"
+                                onClick={() => setAddImageDialog({ open: false, name: "", url: "", visibility: getDefaultVisibility(user) })}>Huỷ</Button>
+                            <Button disabled={!addImageDialog.name.trim() || !addImageDialog.url.trim() || isSubmitting}
+                                onClick={() => void handleAddImage()}>Thêm</Button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Visibility Dialog ────────────────────────────────────── */}
+            {visibilityDialog.open && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                    <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 w-full max-w-md shadow-xl space-y-4">
+                        <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Cài đặt quyền xem</h2>
+                        <VisibilityPicker
+                            user={user}
+                            visibility={visibilityDialog.visibility}
+                            onChange={(v) => setVisibilityDialog((s) => ({ ...s, visibility: v }))}
+                        />
+                        <div className="flex gap-2 justify-end">
+                            <Button variant="outline" className="bg-transparent"
+                                onClick={() => setVisibilityDialog({ open: false, docId: "", visibility: getDefaultVisibility(user) })}>Huỷ</Button>
+                            <Button onClick={() => void handleSaveVisibility()}>Lưu</Button>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    )
+}
+
+// ── VisibilityPicker component ───────────────────────────────────────
+
+function VisibilityPicker({
+    user, visibility, onChange
+}: {
+    user: UserAccount | null
+    visibility: DocVisibility
+    onChange: (visibility: DocVisibility) => void
+}) {
+    const isCeoOrAdmin = user?.role === "ceo" || user?.role === "admin"
+    const isVanHanhLeader = user?.role === "leader" && user?.department === "Vận hành"
+    const showGroupPicker = isCeoOrAdmin || isVanHanhLeader
+
+    if (!showGroupPicker) {
+        // Regular leader: auto "team", no choice
+        return (
+            <div className="space-y-2">
+                <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Ai có thể xem?</p>
+                <div className="flex items-center gap-2 p-3 rounded-xl border border-green-400 bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300">
+                    <Globe className="w-4 h-4" />
+                    <div>
+                        <p className="text-sm font-medium">Tất cả phòng ban</p>
+                        <p className="text-xs opacity-70">Mọi người trong phòng ban của bạn</p>
+                    </div>
+                </div>
+            </div>
+        )
+    }
+
+    const officeLabel = isCeoOrAdmin ? "Tất cả nhân viên văn phòng" : "Nhân viên văn phòng (Vận hành)"
+    const officeDesc = isCeoOrAdmin ? "Tất cả các phòng ban trừ cửa hàng" : "Nhân viên trong phòng Vận hành"
+    const officeValue: DocVisibility = isCeoOrAdmin ? "office" : "team"
+
+    return (
+        <div className="space-y-3">
+            <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Ai có thể xem?</p>
+            <div className="flex gap-3">
+                <button
+                    type="button"
+                    onClick={() => onChange(officeValue)}
+                    className={`flex-1 flex items-center gap-2 p-3 rounded-xl border transition-all ${
+                        visibility === officeValue
+                            ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300"
+                            : "border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:border-blue-300"
+                    }`}
+                >
+                    <Building2 className="w-4 h-4 flex-shrink-0" />
+                    <div className="text-left">
+                        <p className="text-sm font-medium">Nhân viên văn phòng</p>
+                        <p className="text-xs opacity-70">{officeDesc}</p>
+                    </div>
+                </button>
+                <button
+                    type="button"
+                    onClick={() => onChange("store")}
+                    className={`flex-1 flex items-center gap-2 p-3 rounded-xl border transition-all ${
+                        visibility === "store"
+                            ? "border-teal-500 bg-teal-50 dark:bg-teal-900/20 text-teal-700 dark:text-teal-300"
+                            : "border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:border-teal-300"
+                    }`}
+                >
+                    <Store className="w-4 h-4 flex-shrink-0" />
+                    <div className="text-left">
+                        <p className="text-sm font-medium">Nhân viên cửa hàng</p>
+                        <p className="text-xs opacity-70">Nhân viên thuộc phòng Cửa hàng</p>
+                    </div>
+                </button>
+            </div>
+            {isCeoOrAdmin && (
+                <p className="text-xs text-gray-400 dark:text-gray-500">
+                    Văn phòng: tất cả phòng ban trừ Cửa hàng · Cửa hàng: nhân viên thuộc team Cửa hàng
+                </p>
+            )}
         </div>
     )
 }
