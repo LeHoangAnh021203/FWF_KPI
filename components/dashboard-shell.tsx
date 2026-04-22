@@ -54,6 +54,7 @@ const sectionAccess: Record<RoleKey, SectionKey[]> = {
   ceo: ["overview", "board", "kpi", "reports", "audit"],
   leader: ["overview", "board", "kpi", "audit"],
   employee: ["overview", "board", "kpi"],
+  store_staff: ["overview", "board", "kpi"],
   admin: ["overview", "board", "kpi", "reports", "audit"]
 };
 
@@ -61,6 +62,7 @@ const roles: { id: RoleKey; label: string }[] = [
   { id: "ceo", label: "CEO" },
   { id: "leader", label: "Leader" },
   { id: "employee", label: "Nhân viên" },
+  { id: "store_staff", label: "Nhân viên cửa hàng" },
   { id: "admin", label: "Admin" }
 ];
 
@@ -111,6 +113,18 @@ const roleData: Record<
     heroPending: "2",
     metricTasks: "12",
     metricDept: "KPI cá nhân tốt",
+    metricRisk: "01",
+    metricApproval: "02"
+  },
+  store_staff: {
+    heroTitle: "Hôm nay bạn có thể tự quản lý task cửa hàng và cập nhật tiến độ",
+    heroDescription:
+      "Nhân viên cửa hàng có thể thêm task mới, sửa nội dung, ghi chú tiến độ và xóa task cá nhân ngay trên dashboard.",
+    heroOnTime: "95%",
+    heroKpi: "87.8",
+    heroPending: "3",
+    metricTasks: "14",
+    metricDept: "Vận hành cửa hàng ổn định",
     metricRisk: "01",
     metricApproval: "02"
   },
@@ -484,7 +498,7 @@ export function DashboardShell() {
   const activeRole = roleData[role];
   const department = (user?.department ?? "IT") as Department;
   const availableSections = sections.filter((item) => sectionAccess[role].includes(item.id));
-  const isEmployee = role === "employee";
+  const isEmployee = role === "employee" || role === "store_staff";
 
   const taskSummary = useMemo(() => {
     const total = tasks.length;
