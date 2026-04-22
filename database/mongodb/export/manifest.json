@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-04-07T02:53:21.134Z",
+  "generatedAt": "2026-04-20T10:02:25.183Z",
   "databaseName": "fwf_kpi",
   "collections": [
     {
       "name": "company_teams",
-      "count": 5
+      "count": 7
     },
     {
       "name": "people",
@@ -24,7 +24,7 @@
     },
     {
       "name": "documents",
-      "count": 12
+      "count": 0
     },
     {
       "name": "chat_threads",
@@ -33,10 +33,6 @@
     {
       "name": "chat_messages",
       "count": 12
-    },
-    {
-      "name": "document_folders",
-      "count": 3
     }
   ]
 }

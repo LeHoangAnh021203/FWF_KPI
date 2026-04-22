@@ -40,9 +40,10 @@ import {
     Import,
     CheckCircle,
     Users,
+    ClipboardCheck,
 } from "lucide-react"
 
-type SidebarPath = "/" | "/dashboard" | "/projects" | "/people" | "/chats" | "/documents" | "/recipts"
+type SidebarPath = "/" | "/dashboard" | "/projects" | "/people" | "/chats" | "/documents" | "/recipts" | "/tests"
 
 interface SidebarItem {
     name: string
@@ -189,6 +190,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         { name: "Documents", icon: FileText, path: "/documents" },
         { name: "Receipts", icon: Receipt, path: "/recipts" },
     ]
+    const isOperationsLeader = user?.role === "leader" && user?.department === "Vận hành"
+    if (isOperationsLeader) {
+        sidebarItems.splice(3, 0, { name: "Tạo bài kiểm tra", icon: ClipboardCheck, path: "/tests" })
+    }
 
     const colorOptions = [
         { name: "Blue", value: "bg-blue-200 dark:bg-blue-800" },

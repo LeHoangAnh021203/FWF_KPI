@@ -1,6 +1,6 @@
 # MongoDB Seed
 
-Thư mục này chứa bộ seed MongoDB được build từ dữ liệu hiện tại của app.
+Thư mục này chứa bộ seed MongoDB để import nhanh cho local/dev.
 
 ## Collections
 
@@ -24,6 +24,8 @@ Script sẽ xuất file JSON vào:
 ```bash
 database/mongodb/export
 ```
+
+Lưu ý: collection `documents` sẽ được lấy trực tiếp từ MongoDB thật (theo `MONGODB_URI/MONGO_URI` và `MONGODB_DB`), không còn đọc từ mock data trong code.
 
 ## Import vào MongoDB
 
@@ -74,7 +76,6 @@ OTP_DEBUG=true
 
 ## Ghi chú
 
-- Seed hiện tại được lấy từ data mock đang dùng trong app.
-- Một số `ownerId` hoặc `assigneeId` cũ không còn tồn tại trong mock hiện tại sẽ được tự map về leader mặc định để tránh lỗi dữ liệu mồ côi.
+- Một số `ownerId` hoặc `assigneeId` không còn tồn tại trong danh sách nhân sự sẽ được tự map về leader mặc định để tránh dữ liệu mồ côi.
 - Trường `tasks.progress` và `tasks.target` đã được include để khớp với chức năng cập nhật tiến độ hiện tại.
 - `users.password` đang giữ đúng seed login hiện tại của app để bạn có thể import và test nhanh. Khi đưa vào production, cần hash lại mật khẩu trước khi dùng thật.

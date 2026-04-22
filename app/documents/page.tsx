@@ -20,7 +20,6 @@ import {
     Filter,
     Grid3X3,
     List,
-    Upload,
     FolderPlus,
     FolderOpen,
     Folder as FolderIcon,
@@ -36,7 +35,6 @@ import {
     Tag,
     MoreHorizontal,
     Link,
-    Image,
     Globe,
     Store,
     Building2,
@@ -59,29 +57,47 @@ interface NewFolderDialogState {
     name: string
 }
 
-interface AddLinkDialogState {
+interface CreateDocumentDialogState {
     open: boolean
     name: string
-    url: string
+    link: string
+    thumbnail: string
     visibility: DocVisibility
-}
-
-interface AddImageDialogState {
-    open: boolean
-    name: string
-    url: string
-    visibility: DocVisibility
+    file: File | null
+    selectedOfficePersonIds: string[]
 }
 
 interface VisibilityDialogState {
     open: boolean
     docId: string
     visibility: DocVisibility
+    selectedOfficePersonIds: string[]
 }
 
 function getDefaultVisibility(user: UserAccount | null): DocVisibility {
     if (user?.role === "ceo" || user?.role === "admin") return "office"
     return "team"
+}
+
+function buildDefaultCreateDocumentDialog(user: UserAccount | null): CreateDocumentDialogState {
+    return {
+        open: false,
+        name: "",
+        link: "",
+        thumbnail: "",
+        visibility: getDefaultVisibility(user),
+        file: null,
+        selectedOfficePersonIds: [],
+    }
+}
+
+function buildDefaultVisibilityDialog(user: UserAccount | null): VisibilityDialogState {
+    return {
+        open: false,
+        docId: "",
+        visibility: getDefaultVisibility(user),
+        selectedOfficePersonIds: [],
+    }
 }
 
 export default function DocumentsPage() {
@@ -95,26 +111,27 @@ export default function DocumentsPage() {
     const [viewMode, setViewMode] = useState<ViewMode>("grid")
     const [selectedDocument, setSelectedDocument] = useState<Document | null>(null)
     const [isDrawerOpen, setIsDrawerOpen] = useState(false)
+    const [drawerPreviewImageFailed, setDrawerPreviewImageFailed] = useState(false)
     const [contextMenu, setContextMenu] = useState<{ document: Document; position: ContextMenuPosition } | null>(null)
     const [documentsData, setDocumentsData] = useState<Document[]>([])
     const [folders, setFolders] = useState<Folder[]>([])
     const [activeFolderId, setActiveFolderId] = useState<string | null>(null)
     const [newFolderDialog, setNewFolderDialog] = useState<NewFolderDialogState>({ open: false, name: "" })
-    const [addLinkDialog, setAddLinkDialog] = useState<AddLinkDialogState>({
-        open: false, name: "", url: "", visibility: getDefaultVisibility(user)
-    })
-    const [addImageDialog, setAddImageDialog] = useState<AddImageDialogState>({
-        open: false, name: "", url: "", visibility: getDefaultVisibility(user)
-    })
-    const [visibilityDialog, setVisibilityDialog] = useState<VisibilityDialogState>({
-        open: false, docId: "", visibility: getDefaultVisibility(user)
-    })
+    const [createDocumentDialog, setCreateDocumentDialog] = useState<CreateDocumentDialogState>(
+        buildDefaultCreateDocumentDialog(user)
+    )
+    const [visibilityDialog, setVisibilityDialog] = useState<VisibilityDialogState>(
+        buildDefaultVisibilityDialog(user)
+    )
     const [isSubmitting, setIsSubmitting] = useState(false)
 
     const contextMenuRef = useRef<HTMLDivElement>(null)
-    const uploadInputRef = useRef<HTMLInputElement>(null)
 
     const activeFolder = folders.find((f) => f.id === activeFolderId) ?? null
+    const currentPerson = people.find((person) => person.id === user?.personId) ?? null
+    const officeSelectablePeople = currentPerson
+        ? people.filter((person) => person.team === currentPerson.team)
+        : []
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -134,6 +151,17 @@ export default function DocumentsPage() {
     useEffect(() => {
         loadDocuments()
     }, [activeFolderId])
+
+    useEffect(() => {
+        setDrawerPreviewImageFailed(false)
+    }, [selectedDocument?.id])
+
+    useEffect(() => {
+        setCreateDocumentDialog((state) => ({
+            ...state,
+            visibility: getDefaultVisibility(user),
+        }))
+    }, [user])
 
     const loadFolders = async () => {
         try {
@@ -205,7 +233,9 @@ export default function DocumentsPage() {
     const handleDeleteFolder = async (folderId: string) => {
         if (!confirm("Xóa folder này? Các file bên trong sẽ không bị xóa.")) return
         try {
-            await fetch(`/api/documents/folders/${folderId}`, { method: "DELETE", credentials: "include" })
+            const res = await fetch(`/api/documents/folders/${folderId}`, { method: "DELETE", credentials: "include" })
+            const payload = (await res.json()) as { ok: boolean; message?: string }
+            if (!res.ok || !payload.ok) throw new Error(payload.message || "Không thể xóa folder")
             setFolders((prev) => prev.filter((f) => f.id !== folderId))
             if (activeFolderId === folderId) {
                 setActiveFolderId(null)
@@ -217,104 +247,89 @@ export default function DocumentsPage() {
         }
     }
 
-    // ── Add Link handler ─────────────────────────────────────────────
+    const openCreateDocumentDialog = () => {
+        setCreateDocumentDialog({
+            ...buildDefaultCreateDocumentDialog(user),
+            open: true,
+        })
+    }
 
-    const handleAddLink = async () => {
-        if (!addLinkDialog.name.trim() || !addLinkDialog.url.trim()) return
+    const closeCreateDocumentDialog = () => {
+        setCreateDocumentDialog(buildDefaultCreateDocumentDialog(user))
+    }
+
+    const handleCreateDocument = async () => {
+        const { file, name, link, thumbnail, visibility } = createDocumentDialog
+        const selectedOfficePersonIds = createDocumentDialog.selectedOfficePersonIds ?? []
+
+        const normalizedLink = link.trim()
+        const normalizedThumbnail = thumbnail.trim()
+        const normalizedName = name.trim()
+        const safeLink =
+            normalizedLink.startsWith("http://") || normalizedLink.startsWith("https://")
+                ? normalizedLink
+                : undefined
+        const safeThumbnail =
+            normalizedThumbnail.startsWith("http://") ||
+            normalizedThumbnail.startsWith("https://") ||
+            normalizedThumbnail.startsWith("data:image/")
+                ? normalizedThumbnail
+                : undefined
+        const canSubmit = Boolean(file || normalizedName || safeLink || safeThumbnail)
+        if (!canSubmit) return
+
         setIsSubmitting(true)
         try {
+            const requestVisibility: Document["visibility"] =
+                (visibility === "team" || visibility === "office") && selectedOfficePersonIds.length > 0
+                    ? "specific"
+                    : visibility
+
+            const requestPayload = file
+                ? {
+                    name: normalizedName || file.name,
+                    type: inferDocumentType(file.name),
+                    size: file.size,
+                    folderId: activeFolderId ?? undefined,
+                    tags: ["uploaded"],
+                    visibility: requestVisibility,
+                    visibleToPersonIds: requestVisibility === "specific" ? selectedOfficePersonIds : [],
+                    description: `Uploaded on ${new Date().toLocaleDateString("vi-VN")}`,
+                    url: safeLink,
+                    thumbnail: safeThumbnail,
+                }
+                : {
+                    name:
+                        normalizedName ||
+                        (safeLink ? safeLink : safeThumbnail ? "Image" : "Untitled"),
+                    type: safeLink ? ("link" as const) : safeThumbnail ? ("image" as const) : ("txt" as const),
+                    size: 0,
+                    folderId: activeFolderId ?? undefined,
+                    tags: [safeLink ? "link" : safeThumbnail ? "image" : "note"],
+                    visibility: requestVisibility,
+                    visibleToPersonIds: requestVisibility === "specific" ? selectedOfficePersonIds : [],
+                    description: `Created on ${new Date().toLocaleDateString("vi-VN")}`,
+                    url: safeLink,
+                    thumbnail: safeThumbnail,
+                }
+
             const res = await fetch("/api/documents", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 credentials: "include",
-                body: JSON.stringify({
-                    name: addLinkDialog.name.trim(),
-                    type: "link",
-                    size: 0,
-                    url: addLinkDialog.url.trim(),
-                    folderId: activeFolderId ?? undefined,
-                    tags: ["link"],
-                    visibility: addLinkDialog.visibility,
-                    visibleToPersonIds: [],
-                }),
+                body: JSON.stringify(requestPayload),
             })
-            const payload = (await res.json()) as { ok: boolean; document: Document }
+
+            const responsePayload = (await res.json()) as { ok: boolean; document: Document }
             if (!res.ok) throw new Error()
-            setDocumentsData((prev) => [payload.document, ...prev])
-            setAddLinkDialog({ open: false, name: "", url: "", visibility: getDefaultVisibility(user) })
-            toast({ title: "Đã thêm link" })
+
+            setDocumentsData((prev) => [responsePayload.document, ...prev])
+            closeCreateDocumentDialog()
+            toast({ title: "Tạo file thành công" })
         } catch {
-            toast({ title: "Không thể thêm link", variant: "destructive" })
+            toast({ title: "Không thể tạo tài liệu", variant: "destructive" })
         } finally {
             setIsSubmitting(false)
-        }
-    }
-
-    // ── Add Image handler ────────────────────────────────────────────
-
-    const handleAddImage = async () => {
-        if (!addImageDialog.name.trim() || !addImageDialog.url.trim()) return
-        setIsSubmitting(true)
-        try {
-            const res = await fetch("/api/documents", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                credentials: "include",
-                body: JSON.stringify({
-                    name: addImageDialog.name.trim(),
-                    type: "image",
-                    size: 0,
-                    thumbnail: addImageDialog.url.trim(),
-                    folderId: activeFolderId ?? undefined,
-                    tags: ["image"],
-                    visibility: addImageDialog.visibility,
-                    visibleToPersonIds: [],
-                }),
-            })
-            const payload = (await res.json()) as { ok: boolean; document: Document }
-            if (!res.ok) throw new Error()
-            setDocumentsData((prev) => [payload.document, ...prev])
-            setAddImageDialog({ open: false, name: "", url: "", visibility: getDefaultVisibility(user) })
-            toast({ title: "Đã thêm hình ảnh" })
-        } catch {
-            toast({ title: "Không thể thêm hình ảnh", variant: "destructive" })
-        } finally {
-            setIsSubmitting(false)
-        }
-    }
-
-    // ── Upload handler ───────────────────────────────────────────────
-
-    const handleUploadDocuments = async (files: FileList | null) => {
-        if (!files || files.length === 0) return
-        const defaultVis = getDefaultVisibility(user)
-        try {
-            const created = await Promise.all(
-                Array.from(files).map(async (file) => {
-                    const res = await fetch("/api/documents", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        credentials: "include",
-                        body: JSON.stringify({
-                            name: file.name,
-                            type: inferDocumentType(file.name),
-                            size: file.size,
-                            folderId: activeFolderId ?? undefined,
-                            tags: ["uploaded"],
-                            visibility: defaultVis,
-                            visibleToPersonIds: [],
-                            description: `Uploaded on ${new Date().toLocaleDateString("vi-VN")}`,
-                        }),
-                    })
-                    if (!res.ok) throw new Error()
-                    const payload = (await res.json()) as { ok: boolean; document: Document }
-                    return payload.document
-                })
-            )
-            setDocumentsData((prev) => [...created, ...prev])
-            toast({ title: "Upload thành công", description: `Đã thêm ${created.length} file.` })
-        } catch {
-            toast({ title: "Upload thất bại", variant: "destructive" })
         }
     }
 
@@ -322,13 +337,20 @@ export default function DocumentsPage() {
 
     const handleSaveVisibility = async () => {
         try {
+            const selectedOfficePersonIds = visibilityDialog.selectedOfficePersonIds ?? []
+            const requestVisibility: Document["visibility"] =
+                (visibilityDialog.visibility === "team" || visibilityDialog.visibility === "office") &&
+                    selectedOfficePersonIds.length > 0
+                    ? "specific"
+                    : visibilityDialog.visibility
             const updated = await patchDocument(visibilityDialog.docId, {
-                visibility: visibilityDialog.visibility,
-                visibleToPersonIds: [],
+                visibility: requestVisibility,
+                visibleToPersonIds:
+                    requestVisibility === "specific" ? selectedOfficePersonIds : [],
             })
             setDocumentsData((prev) => prev.map((d) => (d.id === updated.id ? updated : d)))
             if (selectedDocument?.id === updated.id) setSelectedDocument(updated)
-            setVisibilityDialog({ open: false, docId: "", visibility: getDefaultVisibility(user) })
+            setVisibilityDialog(buildDefaultVisibilityDialog(user))
             toast({ title: "Đã cập nhật quyền xem" })
         } catch {
             toast({ title: "Không thể cập nhật quyền xem", variant: "destructive" })
@@ -655,30 +677,11 @@ export default function DocumentsPage() {
                     {/* Actions inside folder — leader/admin only */}
                     {isLeaderOrAdmin && (
                         <div className="ml-auto flex gap-2">
-                            <input
-                                ref={uploadInputRef}
-                                type="file"
-                                multiple
-                                className="hidden"
-                                onChange={(e) => { void handleUploadDocuments(e.target.files); e.target.value = "" }}
-                            />
                             <Button size="sm" variant="outline"
                                 className="border-blue-300 text-blue-700 dark:text-blue-300 bg-transparent"
-                                onClick={() => uploadInputRef.current?.click()}>
-                                <Upload className="w-3.5 h-3.5 mr-1" />
-                                Upload
-                            </Button>
-                            <Button size="sm" variant="outline"
-                                className="border-blue-300 text-blue-700 dark:text-blue-300 bg-transparent"
-                                onClick={() => setAddLinkDialog({ open: true, name: "", url: "", visibility: getDefaultVisibility(user) })}>
-                                <Link className="w-3.5 h-3.5 mr-1" />
-                                Thêm link
-                            </Button>
-                            <Button size="sm" variant="outline"
-                                className="border-blue-300 text-blue-700 dark:text-blue-300 bg-transparent"
-                                onClick={() => setAddImageDialog({ open: true, name: "", url: "", visibility: getDefaultVisibility(user) })}>
-                                <Image className="w-3.5 h-3.5 mr-1" />
-                                Thêm ảnh
+                                onClick={openCreateDocumentDialog}>
+                                <Plus className="w-3.5 h-3.5 mr-1" />
+                                Tạo tài liệu
                             </Button>
                         </div>
                     )}
@@ -742,21 +745,12 @@ export default function DocumentsPage() {
                         </Button>
                     </div>
 
-                    {/* Upload outside folder — leader/admin only */}
+                    {/* Create document outside folder — leader/admin only */}
                     {!activeFolderId && isLeaderOrAdmin && (
-                        <>
-                            <input
-                                ref={uploadInputRef}
-                                type="file"
-                                multiple
-                                className="hidden"
-                                onChange={(e) => { void handleUploadDocuments(e.target.files); e.target.value = "" }}
-                            />
-                            <Button className="bg-blue-600 hover:bg-blue-700" onClick={() => uploadInputRef.current?.click()}>
-                                <Upload className="w-4 h-4 mr-2" />
-                                Upload
-                            </Button>
-                        </>
+                        <Button className="bg-blue-600 hover:bg-blue-700" onClick={openCreateDocumentDialog}>
+                            <Plus className="w-4 h-4 mr-2" />
+                            Tạo tài liệu
+                        </Button>
                     )}
                 </div>
             </div>
@@ -826,8 +820,13 @@ export default function DocumentsPage() {
                     {isLeaderOrAdmin && (
                         <button className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
                             onClick={() => {
-                                const vis = (contextMenu.document.visibility ?? "team") as DocVisibility
-                                setVisibilityDialog({ open: true, docId: contextMenu.document.id, visibility: vis })
+                                const vis = contextMenu.document.visibility ?? "team"
+                                setVisibilityDialog({
+                                    open: true,
+                                    docId: contextMenu.document.id,
+                                    visibility: vis === "specific" ? "team" : (vis as DocVisibility),
+                                    selectedOfficePersonIds: contextMenu.document.visibleToPersonIds ?? [],
+                                })
                                 setContextMenu(null)
                             }}>
                             <Globe className="w-4 h-4 mr-2" />Quyền xem
@@ -868,8 +867,19 @@ export default function DocumentsPage() {
                                 <div className="space-y-3">
                                     <h3 className="text-sm font-medium text-gray-900 dark:text-white">Xem trước</h3>
                                     <div className="w-full h-48 bg-gray-100 dark:bg-gray-700 rounded-lg flex items-center justify-center overflow-hidden">
-                                        {selectedDocument.thumbnail ? (
-                                            <img src={selectedDocument.thumbnail} alt={selectedDocument.name} className="max-w-full max-h-full object-contain rounded-lg" />
+                                        {selectedDocument.type === "mp4" && selectedDocument.url ? (
+                                            <video
+                                                src={selectedDocument.url}
+                                                controls
+                                                className="max-w-full max-h-full rounded-lg"
+                                            />
+                                        ) : selectedDocument.thumbnail && !drawerPreviewImageFailed ? (
+                                            <img
+                                                src={selectedDocument.thumbnail}
+                                                alt={selectedDocument.name}
+                                                className="max-w-full max-h-full object-contain rounded-lg"
+                                                onError={() => setDrawerPreviewImageFailed(true)}
+                                            />
                                         ) : selectedDocument.type === "link" ? (
                                             <div className="text-center">
                                                 <Link className="w-10 h-10 text-cyan-400 mx-auto mb-2" />
@@ -881,7 +891,11 @@ export default function DocumentsPage() {
                                         ) : (
                                             <div className="text-center">
                                                 <span className="text-4xl mb-2 block">{docType.icon}</span>
-                                                <p className="text-sm text-gray-500 dark:text-gray-400">Không có xem trước</p>
+                                                <p className="text-sm text-gray-500 dark:text-gray-400">
+                                                    {selectedDocument.type === "mp4"
+                                                        ? "Chưa có link video để xem trước"
+                                                        : "Không có xem trước"}
+                                                </p>
                                             </div>
                                         )}
                                     </div>
@@ -902,6 +916,19 @@ export default function DocumentsPage() {
                                             <span className="text-gray-500">Kích thước</span>
                                             <span className="text-gray-900 dark:text-white">{formatFileSize(selectedDocument.size)}</span>
                                         </div>
+                                        {selectedDocument.url && (
+                                            <div className="flex justify-between items-start gap-3">
+                                                <span className="text-gray-500">Link đính kèm</span>
+                                                <a
+                                                    href={selectedDocument.url}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="text-cyan-600 dark:text-cyan-400 underline text-right max-w-[250px] break-all"
+                                                >
+                                                    {selectedDocument.url}
+                                                </a>
+                                            </div>
+                                        )}
                                         <div className="flex justify-between items-center">
                                             <span className="text-gray-500">Quyền xem</span>
                                             <VisibilityBadge doc={selectedDocument} />
@@ -966,8 +993,13 @@ export default function DocumentsPage() {
                                     {isLeaderOrAdmin && (
                                         <Button variant="outline" className="flex-1 bg-transparent"
                                             onClick={() => {
-                                                const vis = (selectedDocument.visibility ?? "team") as DocVisibility
-                                                setVisibilityDialog({ open: true, docId: selectedDocument.id, visibility: vis })
+                                                const vis = selectedDocument.visibility ?? "team"
+                                                setVisibilityDialog({
+                                                    open: true,
+                                                    docId: selectedDocument.id,
+                                                    visibility: vis === "specific" ? "team" : (vis as DocVisibility),
+                                                    selectedOfficePersonIds: selectedDocument.visibleToPersonIds ?? [],
+                                                })
                                             }}>
                                             <Globe className="w-4 h-4 mr-2" />Quyền xem
                                         </Button>
@@ -1002,52 +1034,119 @@ export default function DocumentsPage() {
                 </div>
             )}
 
-            {/* ── Add Link Dialog ──────────────────────────────────────── */}
-            {addLinkDialog.open && (
+            {/* ── Create Document Dialog ──────────────────────────────── */}
+            {createDocumentDialog.open && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
                     <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 w-full max-w-md shadow-xl space-y-4">
-                        <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Thêm link</h2>
-                        <Input placeholder="Tên hiển thị..." value={addLinkDialog.name}
-                            onChange={(e) => setAddLinkDialog((s) => ({ ...s, name: e.target.value }))} />
-                        <Input placeholder="https://..." value={addLinkDialog.url}
-                            onChange={(e) => setAddLinkDialog((s) => ({ ...s, url: e.target.value }))} />
-                        <VisibilityPicker
-                            user={user}
-                            visibility={addLinkDialog.visibility}
-                            onChange={(v) => setAddLinkDialog((s) => ({ ...s, visibility: v }))}
-                        />
-                        <div className="flex gap-2 justify-end">
-                            <Button variant="outline" className="bg-transparent"
-                                onClick={() => setAddLinkDialog({ open: false, name: "", url: "", visibility: getDefaultVisibility(user) })}>Huỷ</Button>
-                            <Button disabled={!addLinkDialog.name.trim() || !addLinkDialog.url.trim() || isSubmitting}
-                                onClick={() => void handleAddLink()}>Thêm</Button>
-                        </div>
-                    </div>
-                </div>
-            )}
+                        <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Tạo tài liệu</h2>
 
-            {/* ── Add Image Dialog ─────────────────────────────────────── */}
-            {addImageDialog.open && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-                    <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 w-full max-w-md shadow-xl space-y-4">
-                        <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Thêm hình ảnh</h2>
-                        <Input placeholder="Tên hình ảnh..." value={addImageDialog.name}
-                            onChange={(e) => setAddImageDialog((s) => ({ ...s, name: e.target.value }))} />
-                        <Input placeholder="URL hình ảnh https://..." value={addImageDialog.url}
-                            onChange={(e) => setAddImageDialog((s) => ({ ...s, url: e.target.value }))} />
-                        {addImageDialog.url && (
-                            <img src={addImageDialog.url} alt="preview" className="w-full h-40 object-cover rounded-lg border" onError={(e) => (e.currentTarget.style.display = "none")} />
+                        <div className="space-y-3">
+                            <Input
+                                type="file"
+                                onChange={(e) => {
+                                    const file = e.target.files?.[0] ?? null
+                                    setCreateDocumentDialog((s) => ({
+                                        ...s,
+                                        file,
+                                        name: file ? file.name : s.name,
+                                    }))
+                                }}
+                            />
+                            <Input
+                                placeholder="Tên file (tuỳ chọn, mặc định lấy theo file đã chọn)"
+                                value={createDocumentDialog.name}
+                                onChange={(e) => setCreateDocumentDialog((s) => ({ ...s, name: e.target.value }))}
+                            />
+                            <Input
+                                placeholder="Link đính kèm (tuỳ chọn) - https://..."
+                                value={createDocumentDialog.link}
+                                onChange={(e) => setCreateDocumentDialog((s) => ({ ...s, link: e.target.value }))}
+                            />
+                            <Input
+                                placeholder="Ảnh xem trước URL (tuỳ chọn) - https://..."
+                                value={createDocumentDialog.thumbnail}
+                                onChange={(e) => setCreateDocumentDialog((s) => ({ ...s, thumbnail: e.target.value }))}
+                            />
+                        </div>
+
+                        {createDocumentDialog.thumbnail && (
+                            <img src={createDocumentDialog.thumbnail} alt="preview" className="w-full h-40 object-cover rounded-lg border" onError={(e) => (e.currentTarget.style.display = "none")} />
                         )}
                         <VisibilityPicker
                             user={user}
-                            visibility={addImageDialog.visibility}
-                            onChange={(v) => setAddImageDialog((s) => ({ ...s, visibility: v }))}
+                            visibility={createDocumentDialog.visibility}
+                            onChange={(v) => setCreateDocumentDialog((s) => ({
+                                ...s,
+                                visibility: v,
+                                selectedOfficePersonIds: (v === "team" || v === "office") ? (s.selectedOfficePersonIds ?? []) : [],
+                            }))}
                         />
+                        {(createDocumentDialog.visibility === "team" || createDocumentDialog.visibility === "office") && officeSelectablePeople.length > 0 && (
+                            <div className="space-y-2">
+                                <p className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                                    Nhân viên trực thuộc phòng ban
+                                </p>
+                                <div className="max-h-44 overflow-y-auto rounded-xl border border-gray-200 dark:border-gray-700 p-2 space-y-2 bg-white/60 dark:bg-gray-900/20">
+                                    <button
+                                        type="button"
+                                        onClick={() => setCreateDocumentDialog((s) => ({ ...s, selectedOfficePersonIds: [] }))}
+                                        className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-all ${
+                                            (createDocumentDialog.selectedOfficePersonIds ?? []).length === 0
+                                                ? "border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300"
+                                                : "border-gray-300 text-gray-600 hover:border-blue-300 dark:border-gray-600 dark:text-gray-300"
+                                        }`}
+                                    >
+                                        Tất cả
+                                    </button>
+                                    {officeSelectablePeople.map((person) => {
+                                        const selected = (createDocumentDialog.selectedOfficePersonIds ?? []).includes(person.id)
+                                        return (
+                                            <button
+                                                key={person.id}
+                                                type="button"
+                                                onClick={() => setCreateDocumentDialog((s) => {
+                                                    const selectedIds = s.selectedOfficePersonIds ?? []
+                                                    const exists = selectedIds.includes(person.id)
+                                                    return {
+                                                        ...s,
+                                                        selectedOfficePersonIds: exists
+                                                            ? selectedIds.filter((id) => id !== person.id)
+                                                            : [...selectedIds, person.id],
+                                                    }
+                                                })}
+                                                className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-all ${
+                                                    selected
+                                                        ? "border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300"
+                                                        : "border-gray-300 text-gray-600 hover:border-blue-300 dark:border-gray-600 dark:text-gray-300"
+                                                }`}
+                                            >
+                                                {person.name}
+                                            </button>
+                                        )
+                                    })}
+                                </div>
+                                <p className="text-xs text-gray-500 dark:text-gray-400">
+                                    Chọn &quot;Tất cả&quot; để chia sẻ cho toàn bộ phòng ban, hoặc chọn từng nhân viên cụ thể.
+                                </p>
+                            </div>
+                        )}
                         <div className="flex gap-2 justify-end">
                             <Button variant="outline" className="bg-transparent"
-                                onClick={() => setAddImageDialog({ open: false, name: "", url: "", visibility: getDefaultVisibility(user) })}>Huỷ</Button>
-                            <Button disabled={!addImageDialog.name.trim() || !addImageDialog.url.trim() || isSubmitting}
-                                onClick={() => void handleAddImage()}>Thêm</Button>
+                                onClick={closeCreateDocumentDialog}>Huỷ</Button>
+                            <Button
+                                disabled={
+                                    isSubmitting ||
+                                    !(
+                                        createDocumentDialog.file ||
+                                        createDocumentDialog.name.trim() ||
+                                        createDocumentDialog.link.trim() ||
+                                        createDocumentDialog.thumbnail.trim()
+                                    )
+                                }
+                                onClick={() => void handleCreateDocument()}
+                            >
+                                Tạo
+                            </Button>
                         </div>
                     </div>
                 </div>
@@ -1061,11 +1160,64 @@ export default function DocumentsPage() {
                         <VisibilityPicker
                             user={user}
                             visibility={visibilityDialog.visibility}
-                            onChange={(v) => setVisibilityDialog((s) => ({ ...s, visibility: v }))}
+                            onChange={(v) => setVisibilityDialog((s) => ({
+                                ...s,
+                                visibility: v,
+                                selectedOfficePersonIds: (v === "team" || v === "office") ? (s.selectedOfficePersonIds ?? []) : [],
+                            }))}
                         />
+                        {(visibilityDialog.visibility === "team" || visibilityDialog.visibility === "office") && officeSelectablePeople.length > 0 && (
+                            <div className="space-y-2">
+                                <p className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                                    Nhân viên trực thuộc phòng ban
+                                </p>
+                                <div className="max-h-44 overflow-y-auto rounded-xl border border-gray-200 dark:border-gray-700 p-2 space-y-2 bg-white/60 dark:bg-gray-900/20">
+                                    <button
+                                        type="button"
+                                        onClick={() => setVisibilityDialog((s) => ({ ...s, selectedOfficePersonIds: [] }))}
+                                        className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-all ${
+                                            (visibilityDialog.selectedOfficePersonIds ?? []).length === 0
+                                                ? "border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300"
+                                                : "border-gray-300 text-gray-600 hover:border-blue-300 dark:border-gray-600 dark:text-gray-300"
+                                        }`}
+                                    >
+                                        Tất cả
+                                    </button>
+                                    {officeSelectablePeople.map((person) => {
+                                        const selected = (visibilityDialog.selectedOfficePersonIds ?? []).includes(person.id)
+                                        return (
+                                            <button
+                                                key={person.id}
+                                                type="button"
+                                                onClick={() => setVisibilityDialog((s) => {
+                                                    const selectedIds = s.selectedOfficePersonIds ?? []
+                                                    const exists = selectedIds.includes(person.id)
+                                                    return {
+                                                        ...s,
+                                                        selectedOfficePersonIds: exists
+                                                            ? selectedIds.filter((id) => id !== person.id)
+                                                            : [...selectedIds, person.id],
+                                                    }
+                                                })}
+                                                className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-all ${
+                                                    selected
+                                                        ? "border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300"
+                                                        : "border-gray-300 text-gray-600 hover:border-blue-300 dark:border-gray-600 dark:text-gray-300"
+                                                }`}
+                                            >
+                                                {person.name}
+                                            </button>
+                                        )
+                                    })}
+                                </div>
+                                <p className="text-xs text-gray-500 dark:text-gray-400">
+                                    Chọn &quot;Tất cả&quot; để chia sẻ cho toàn bộ phòng ban, hoặc chọn từng nhân viên cụ thể.
+                                </p>
+                            </div>
+                        )}
                         <div className="flex gap-2 justify-end">
                             <Button variant="outline" className="bg-transparent"
-                                onClick={() => setVisibilityDialog({ open: false, docId: "", visibility: getDefaultVisibility(user) })}>Huỷ</Button>
+                                onClick={() => setVisibilityDialog(buildDefaultVisibilityDialog(user))}>Huỷ</Button>
                             <Button onClick={() => void handleSaveVisibility()}>Lưu</Button>
                         </div>
                     </div>
@@ -1096,8 +1248,8 @@ function VisibilityPicker({
                 <div className="flex items-center gap-2 p-3 rounded-xl border border-green-400 bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300">
                     <Globe className="w-4 h-4" />
                     <div>
-                        <p className="text-sm font-medium">Tất cả phòng ban</p>
-                        <p className="text-xs opacity-70">Mọi người trong phòng ban của bạn</p>
+                        <p className="text-sm font-medium">Phòng ban của bạn</p>
+                        <p className="text-xs opacity-70">Chỉ nhân viên cùng phòng ban với leader tạo tài liệu</p>
                     </div>
                 </div>
             </div>

@@ -158,6 +158,17 @@ type DbSchedule = {
   updatedAt: string;
 };
 
+type DbTest = {
+  _id: string;
+  title: string;
+  description: string;
+  questions: string[];
+  durationMinutes: number;
+  createdByPersonId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type DbPersonNotification = {
   _id?: ObjectId;
   personId: string;
@@ -300,6 +311,17 @@ export type UserNotificationRecord = {
   createdAt: string;
   readAt?: string | null;
   unread: boolean;
+};
+
+export type TestRecord = {
+  id: string;
+  title: string;
+  description: string;
+  questions: string[];
+  durationMinutes: number;
+  createdByPersonId: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 const supportedTeamIds = companyTeams.map((team) => team.id);
@@ -864,6 +886,19 @@ function mapDbSchedule(schedule: DbSchedule): ScheduleRecord {
   };
 }
 
+function mapDbTest(record: DbTest): TestRecord {
+  return {
+    id: record._id,
+    title: record.title,
+    description: record.description,
+    questions: record.questions ?? [],
+    durationMinutes: record.durationMinutes,
+    createdByPersonId: record.createdByPersonId,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt
+  };
+}
+
 function createEmptyTaskGroups(): TaskGroups {
   return {
     "This Week": [],
@@ -1015,6 +1050,10 @@ function canManageTask(actor: SessionActor, task: DbTask) {
 
 function canManageSchedules(actor: SessionActor) {
   return actor.isAdmin || actor.isLeader;
+}
+
+function canManageTests(actor: SessionActor) {
+  return actor.user.role === "leader" && actor.user.department === "Vận hành";
 }
 
 function canManageScheduleAttendees(actor: SessionActor, attendeeIds: string[]) {
@@ -2136,6 +2175,72 @@ export async function deleteScheduleRecord(
   return true;
 }
 
+export async function getTestsData(sessionUserId: string | null | undefined) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) {
+    throw new Error("Unauthorized");
+  }
+
+  if (!canManageTests(actor)) {
+    throw new Error("Forbidden");
+  }
+
+  const db = await getMongoDb();
+  const records = await db
+    .collection<DbTest>("tests")
+    .find({}, { sort: { createdAt: -1 } })
+    .toArray();
+
+  return records.map(mapDbTest);
+}
+
+export async function createTestRecord(
+  sessionUserId: string | null | undefined,
+  input: { title: string; description?: string; questions: string[]; durationMinutes: number }
+) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) {
+    throw new Error("Unauthorized");
+  }
+
+  if (!canManageTests(actor)) {
+    throw new Error("Forbidden");
+  }
+
+  const normalizedTitle = input.title.trim();
+  const normalizedQuestions = (input.questions ?? [])
+    .map((question) => question.trim())
+    .filter((question) => question.length > 0);
+
+  if (!normalizedTitle) {
+    throw new Error("Tiêu đề bài kiểm tra là bắt buộc.");
+  }
+
+  if (normalizedQuestions.length === 0) {
+    throw new Error("Cần ít nhất 1 câu hỏi.");
+  }
+
+  const durationMinutes = Number.isFinite(input.durationMinutes)
+    ? Math.max(5, Math.floor(input.durationMinutes))
+    : 30;
+
+  const now = new Date().toISOString();
+  const document: DbTest = {
+    _id: `test_${Date.now()}`,
+    title: normalizedTitle,
+    description: input.description?.trim() ?? "",
+    questions: normalizedQuestions,
+    durationMinutes,
+    createdByPersonId: actor.person.id,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  const db = await getMongoDb();
+  await db.collection<DbTest>("tests").insertOne(document);
+  return mapDbTest(document);
+}
+
 export async function getDocumentsData(sessionUserId?: string | null, folderId?: string | null) {
   const actor = await getSessionActor(sessionUserId);
   if (!actor) return [];
@@ -2145,12 +2250,20 @@ export async function getDocumentsData(sessionUserId?: string | null, folderId?:
   const query: Record<string, unknown> = {};
   if (folderId !== undefined) query.folderId = folderId ?? null;
 
-  const [allDocs, allPeople] = await Promise.all([
+  const [allDocs, allPeople, allUsers] = await Promise.all([
     db.collection<DbDocument>("documents").find(query, { sort: { modifiedAt: -1 } }).toArray(),
     db.collection<DbPerson>("people").find().toArray(),
+    db.collection<DbUser>("users").find({}, { projection: { personId: 1, role: 1 } }).toArray(),
   ]);
 
   const personTeamMap = new Map(allPeople.map((p) => [p._id, p.teamId]));
+  const personRolesMap = new Map<string, Set<UserRole>>();
+  for (const user of allUsers) {
+    if (!user.personId) continue;
+    const roles = personRolesMap.get(user.personId) ?? new Set<UserRole>();
+    roles.add(normalizeUserRole(user.role));
+    personRolesMap.set(user.personId, roles);
+  }
   // Vận hành leader: team "product" + isLeader
   const isVanHanhLeader = actor.isLeader && !actor.isAdmin && actor.person.team === "product";
 
@@ -2159,9 +2272,24 @@ export async function getDocumentsData(sessionUserId?: string | null, folderId?:
       if (actor.isAdmin) return true;
 
       const visibility = doc.visibility ?? "team";
+      const ownerTeam = personTeamMap.get(doc.ownerId);
+      const ownerRoles = personRolesMap.get(doc.ownerId);
+      const ownerIsLeaderCreator =
+        Boolean(ownerRoles?.has("leader")) &&
+        !Boolean(ownerRoles?.has("admin") || ownerRoles?.has("ceo"));
+
+      // Tài liệu do leader tạo: chỉ trong phạm vi phòng ban của leader tạo.
+      if (ownerIsLeaderCreator) {
+        if (visibility === "specific") {
+          return (
+            doc.ownerId === actor.person.id ||
+            (actor.person.team === ownerTeam && (doc.visibleToPersonIds ?? []).includes(actor.person.id))
+          );
+        }
+        return actor.person.team === ownerTeam || doc.ownerId === actor.person.id;
+      }
 
       if (visibility === "team") {
-        const ownerTeam = personTeamMap.get(doc.ownerId);
         return actor.person.team === ownerTeam || doc.ownerId === actor.person.id;
       }
       if (visibility === "office") {
@@ -2187,6 +2315,21 @@ export async function createDocumentRecord(
   const actor = await getSessionActor(sessionUserId);
   if (!actor) throw new Error("Unauthorized");
   if (!actor.isLeader) throw new Error("Forbidden");
+  const isAdminActor = actor.user.role === "admin" || actor.user.role === "ceo";
+  const db = await getMongoDb();
+
+  let normalizedVisibility: Document["visibility"] = input.visibility ?? "team";
+  let normalizedVisibleToPersonIds: string[] = input.visibleToPersonIds ?? [];
+
+  if (!isAdminActor) {
+    const departmentPeople = await db.collection<DbPerson>("people").find(
+      { teamId: actor.person.team },
+      { projection: { _id: 1 } }
+    ).toArray();
+    const departmentPersonIdSet = new Set(departmentPeople.map((person) => person._id));
+    normalizedVisibleToPersonIds = normalizedVisibleToPersonIds.filter((personId) => departmentPersonIdSet.has(personId));
+    normalizedVisibility = normalizedVisibleToPersonIds.length > 0 ? "specific" : "team";
+  }
 
   const now = new Date().toISOString();
   const nextDocument: DbDocument = {
@@ -2204,11 +2347,10 @@ export async function createDocumentRecord(
     thumbnail: input.thumbnail ?? null,
     description: input.description,
     url: input.url,
-    visibility: input.visibility ?? "team",
-    visibleToPersonIds: input.visibleToPersonIds ?? []
+    visibility: normalizedVisibility,
+    visibleToPersonIds: normalizedVisibleToPersonIds
   };
 
-  const db = await getMongoDb();
   await db.collection<DbDocument>("documents").insertOne(nextDocument);
   return mapDbDocument(nextDocument);
 }
@@ -2220,6 +2362,7 @@ export async function updateDocumentRecord(
 ) {
   const actor = await getSessionActor(sessionUserId);
   if (!actor) throw new Error("Unauthorized");
+  const isAdminActor = actor.user.role === "admin" || actor.user.role === "ceo";
 
   const db = await getMongoDb();
   const existing = await db.collection<DbDocument>("documents").findOne({ _id: documentId });
@@ -2234,8 +2377,25 @@ export async function updateDocumentRecord(
   if (updates.isStarred !== undefined) payload.isStarred = updates.isStarred;
   if (updates.description !== undefined) payload.description = updates.description;
   if (updates.thumbnail !== undefined) payload.thumbnail = updates.thumbnail;
-  if (updates.visibility !== undefined) payload.visibility = updates.visibility;
-  if (updates.visibleToPersonIds !== undefined) payload.visibleToPersonIds = updates.visibleToPersonIds;
+  if (isAdminActor) {
+    if (updates.visibility !== undefined) payload.visibility = updates.visibility;
+    if (updates.visibleToPersonIds !== undefined) payload.visibleToPersonIds = updates.visibleToPersonIds;
+  } else {
+    let normalizedVisibleToPersonIds = updates.visibleToPersonIds ?? existing.visibleToPersonIds ?? [];
+    const owner = await db.collection<DbPerson>("people").findOne(
+      { _id: existing.ownerId },
+      { projection: { teamId: 1 } }
+    );
+    const ownerTeamId = owner?.teamId ?? actor.person.team;
+    const departmentPeople = await db.collection<DbPerson>("people").find(
+      { teamId: ownerTeamId },
+      { projection: { _id: 1 } }
+    ).toArray();
+    const departmentPersonIdSet = new Set(departmentPeople.map((person) => person._id));
+    normalizedVisibleToPersonIds = normalizedVisibleToPersonIds.filter((personId) => departmentPersonIdSet.has(personId));
+    payload.visibility = normalizedVisibleToPersonIds.length > 0 ? "specific" : "team";
+    payload.visibleToPersonIds = normalizedVisibleToPersonIds;
+  }
 
   await db.collection<DbDocument>("documents").updateOne({ _id: documentId }, { $set: payload });
   const updated = await db.collection<DbDocument>("documents").findOne({ _id: documentId });
@@ -2298,7 +2458,8 @@ export async function deleteFolderRecord(sessionUserId: string | null | undefine
 
   const db = await getMongoDb();
   const folder = await db.collection<DbFolder>("document_folders").findOne({ _id: folderId });
-  if (!folder || folder.teamId !== actor.person.team) return false;
+  if (!folder) return false;
+  if (!actor.isAdmin && folder.teamId !== actor.person.team) return false;
 
   await db.collection<DbFolder>("document_folders").deleteOne({ _id: folderId });
   await db.collection<DbDocument>("documents").updateMany(

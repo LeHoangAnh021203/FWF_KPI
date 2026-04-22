@@ -1,9 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
+import { MongoClient } from "mongodb";
 
 const rootDir = path.resolve(process.cwd());
 const outputDir = path.join(rootDir, "database", "mongodb", "export");
+const connectionUri = process.env.MONGODB_URI ?? process.env.MONGO_URI;
+const databaseName = process.env.MONGODB_DB ?? "fwf_kpi";
 
 function readFile(relativePath) {
   return fs.readFileSync(path.join(rootDir, relativePath), "utf8");
@@ -147,13 +150,11 @@ function deriveStatusColor(status) {
 
 const authSource = readFile("lib/auth.ts");
 const peopleSource = readFile("lib/people.ts");
-const documentsSource = readFile("lib/documents.ts");
 const workspaceSource = readFile("components/workspace-context.tsx");
 
 const seededUsers = evaluateLiteral(findAssignedLiteral(authSource, "seededUsers"));
 const companyTeams = evaluateLiteral(findAssignedLiteral(peopleSource, "teams"));
 const people = evaluateLiteral(findAssignedLiteral(peopleSource, "people"));
-const documents = evaluateLiteral(findAssignedLiteral(documentsSource, "documents"));
 const workspaceTeams = evaluateLiteral(findAssignedLiteral(workspaceSource, "initialProjects"));
 const currentUserIdLiteral = evaluateLiteral(findAssignedLiteral(workspaceSource, "CURRENT_USER_ID"));
 const initialProjectTasksLiteral = findAssignedLiteral(workspaceSource, "initialProjectTasks").replaceAll(
@@ -168,6 +169,69 @@ const nowIso = new Date().toISOString();
 
 function normalizePersonId(personId) {
   return validPersonIds.has(personId) ? personId : fallbackPerson.id;
+}
+
+async function loadDocumentsCollection() {
+  if (!connectionUri) {
+    throw new Error("Missing MONGODB_URI or MONGO_URI. Cannot export real documents data.");
+  }
+
+  const client = new MongoClient(connectionUri);
+
+  try {
+    await client.connect();
+    const rawDocuments = await client
+      .db(databaseName)
+      .collection("documents")
+      .find({}, { sort: { modifiedAt: -1 } })
+      .toArray();
+
+    return rawDocuments.map((document) => {
+      const ownerId =
+        typeof document.ownerId === "string" && validPersonIds.has(document.ownerId)
+          ? document.ownerId
+          : fallbackPerson.id;
+      const createdAt =
+        typeof document.createdAt === "string" && document.createdAt.trim()
+          ? document.createdAt
+          : nowIso;
+      const modifiedAt =
+        typeof document.modifiedAt === "string" && document.modifiedAt.trim()
+          ? document.modifiedAt
+          : createdAt;
+
+      return {
+        _id: String(document._id),
+        name: typeof document.name === "string" && document.name.trim() ? document.name : "Untitled",
+        type: typeof document.type === "string" ? document.type : "txt",
+        size: typeof document.size === "number" ? document.size : 0,
+        ownerId,
+        createdAt,
+        modifiedAt,
+        folder: typeof document.folder === "string" ? document.folder : null,
+        folderId: typeof document.folderId === "string" ? document.folderId : null,
+        tags: Array.isArray(document.tags)
+          ? document.tags.filter((tag) => typeof tag === "string")
+          : [],
+        isStarred: Boolean(document.isStarred),
+        thumbnail: typeof document.thumbnail === "string" ? document.thumbnail : null,
+        description: typeof document.description === "string" ? document.description : "",
+        url: typeof document.url === "string" ? document.url : undefined,
+        visibility:
+          document.visibility === "team" ||
+          document.visibility === "office" ||
+          document.visibility === "store" ||
+          document.visibility === "specific"
+            ? document.visibility
+            : "team",
+        visibleToPersonIds: Array.isArray(document.visibleToPersonIds)
+          ? document.visibleToPersonIds.filter((personId) => typeof personId === "string")
+          : [],
+      };
+    });
+  } finally {
+    await client.close();
+  }
 }
 
 const usersCollection = seededUsers.map((user) => ({
@@ -263,20 +327,7 @@ const tasksCollection = Object.entries(projectTasks).flatMap(([projectId, taskGr
   ),
 );
 
-const documentsCollection = documents.map((document) => ({
-  _id: document.id,
-  name: document.name,
-  type: document.type,
-  size: document.size,
-  ownerId: normalizePersonId(document.ownerId),
-  createdAt: document.createdAt,
-  modifiedAt: document.modifiedAt,
-  folder: document.folder ?? null,
-  tags: document.tags ?? [],
-  isStarred: Boolean(document.isStarred),
-  thumbnail: document.thumbnail ?? null,
-  description: document.description ?? "",
-}));
+const documentsCollection = await loadDocumentsCollection();
 
 const marketingPeople = people.filter((person) => person.team === "marketing");
 const chatThreadsCollection = [];
@@ -326,7 +377,7 @@ marketingPeople.forEach((person, index) => {
 
 const manifest = {
   generatedAt: nowIso,
-  databaseName: "fwf_kpi",
+  databaseName,
   collections: [
     { name: "company_teams", count: companyTeamsCollection.length },
     { name: "people", count: peopleCollection.length },
