@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { Pie, PieChart, Cell } from "recharts"
-import { CalendarDays, ChevronDown, Search } from "lucide-react"
+import { CalendarDays, ChevronDown, Search, GraduationCap, ChevronRight, CheckCircle2, XCircle } from "lucide-react"
 
 import { useAuth } from "@/components/auth-provider"
 import { useDirectory } from "@/components/directory-provider"
@@ -19,6 +19,29 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useWorkspace, type TimePeriod } from "@/components/workspace-context"
 import { isAdminLikeRole } from "@/lib/auth"
 import { findPersonForAuthUser, getTeamById } from "@/lib/people"
+
+type QuizReportAttempt = {
+    quizId: string
+    documentId: string
+    documentName: string
+    quizTitle: string
+    score: number
+    correctAnswers: number
+    totalQuestions: number
+    submittedAt: string
+}
+
+type QuizReportRow = {
+    personId: string
+    personName: string
+    teamId: string
+    teamName: string
+    totalAttempts: number
+    averageScore: number
+    highestScore: number
+    lastAttemptAt: string
+    attempts: QuizReportAttempt[]
+}
 
 type ViewMode = "employee" | "project"
 type PeriodFilter = "all" | TimePeriod
@@ -109,6 +132,11 @@ export default function DashboardPage() {
     const [selectedEntityId, setSelectedEntityId] = useState<string>("all")
     const [selectedPeriod, setSelectedPeriod] = useState<PeriodFilter>("all")
     const [searchQuery, setSearchQuery] = useState("")
+    const [quizReport, setQuizReport] = useState<QuizReportRow[]>([])
+    const [quizReportLoading, setQuizReportLoading] = useState(true)
+    const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set())
+    const [quizSearchQuery, setQuizSearchQuery] = useState("")
+    const [showParticipantModal, setShowParticipantModal] = useState(false)
     const isAdminUser = isAdminLikeRole(user?.role)
     const currentUser =
         findPersonForAuthUser(user, people) ??
@@ -174,6 +202,20 @@ export default function DashboardPage() {
     useEffect(() => {
         setSelectedEntityId("all")
     }, [viewMode])
+
+    useEffect(() => {
+        const load = async () => {
+            try {
+                const res = await fetch("/api/learning/report", { credentials: "include", cache: "no-store" })
+                if (!res.ok) return
+                const data = (await res.json()) as { rows: QuizReportRow[] }
+                setQuizReport(data.rows ?? [])
+            } catch { /* ignore */ } finally {
+                setQuizReportLoading(false)
+            }
+        }
+        void load()
+    }, [])
 
     const filteredTasks = useMemo(() => {
         return scopedTasks.filter((task) => {
@@ -305,6 +347,20 @@ export default function DashboardPage() {
             total: tableRows.reduce((sum, row) => sum + row.total, 0),
         }),
         [tableRows],
+    )
+
+    // Accessible people (scoped by permission)
+    const accessiblePeople = useMemo(
+        () => people.filter((p) => accessibleMemberIds.includes(p.id)),
+        [people, accessibleMemberIds]
+    )
+    const participantPersonIds = useMemo(
+        () => new Set(quizReport.map((r) => r.personId)),
+        [quizReport]
+    )
+    const nonParticipants = useMemo(
+        () => accessiblePeople.filter((p) => !participantPersonIds.has(p.id)),
+        [accessiblePeople, participantPersonIds]
     )
 
     return (
@@ -613,7 +669,376 @@ export default function DashboardPage() {
                         </div>
                     </CardContent>
                 </Card>
+
+                {/* ── Quiz / E-learning Report ─────────────────────────── */}
+                <Card className="border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-900">
+                    <CardHeader className="pb-2">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="flex items-center gap-2">
+                                <GraduationCap className="h-5 w-5 text-violet-500" />
+                                <CardTitle className="text-xl text-gray-900 dark:text-white">
+                                    Báo cáo kết quả kiểm tra học liệu
+                                </CardTitle>
+                            </div>
+                            <div className="relative w-full sm:w-[240px]">
+                                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+                                <Input
+                                    value={quizSearchQuery}
+                                    onChange={(e) => setQuizSearchQuery(e.target.value)}
+                                    placeholder="Tìm nhân viên..."
+                                    className="pl-9 h-9"
+                                />
+                            </div>
+                        </div>
+                    </CardHeader>
+                    <CardContent className="pt-2">
+                        {quizReportLoading ? (
+                            <div className="flex items-center justify-center py-12 text-sm text-gray-400">
+                                Đang tải dữ liệu...
+                            </div>
+                        ) : quizReport.length === 0 ? (
+                            <div className="flex flex-col items-center justify-center py-14 text-center">
+                                <GraduationCap className="h-10 w-10 text-gray-300 dark:text-gray-600 mb-3" />
+                                <p className="text-sm font-medium text-gray-600 dark:text-gray-400">Chưa có kết quả kiểm tra nào</p>
+                                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                                    Kết quả sẽ hiển thị khi nhân viên hoàn thành các bài kiểm tra học liệu.
+                                </p>
+                            </div>
+                        ) : (() => {
+                            const filtered = quizReport.filter((row) =>
+                                !quizSearchQuery.trim() ||
+                                row.personName.toLowerCase().includes(quizSearchQuery.trim().toLowerCase()) ||
+                                row.teamName.toLowerCase().includes(quizSearchQuery.trim().toLowerCase())
+                            )
+
+                            // Summary stats
+                            const totalDone = filtered.reduce((s, r) => s + r.totalAttempts, 0)
+                            const avgScore = filtered.length === 0 ? 0 : Math.round(filtered.reduce((s, r) => s + r.averageScore, 0) / filtered.length)
+                            const passCount = filtered.filter((r) => r.averageScore >= 80).length
+
+                            return (
+                                <div className="space-y-4">
+                                    {/* Summary cards */}
+                                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                                        <button
+                                            onClick={() => setShowParticipantModal(true)}
+                                            className="rounded-xl bg-violet-50 dark:bg-violet-900/20 px-4 py-3 text-left w-full hover:bg-violet-100 dark:hover:bg-violet-900/40 transition-colors group"
+                                        >
+                                            <p className="text-xs text-violet-600 dark:text-violet-400">Nhân viên tham gia</p>
+                                            <p className="mt-1 text-2xl font-bold text-violet-700 dark:text-violet-300">{filtered.length}</p>
+                                            <p className="mt-1 text-[10px] text-violet-500 dark:text-violet-500 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                Xem chi tiết →
+                                            </p>
+                                        </button>
+                                        <div className="rounded-xl bg-blue-50 dark:bg-blue-900/20 px-4 py-3">
+                                            <p className="text-xs text-blue-600 dark:text-blue-400">Tổng lượt làm</p>
+                                            <p className="mt-1 text-2xl font-bold text-blue-700 dark:text-blue-300">{totalDone}</p>
+                                        </div>
+                                        <div className="rounded-xl bg-amber-50 dark:bg-amber-900/20 px-4 py-3">
+                                            <p className="text-xs text-amber-600 dark:text-amber-400">Điểm TB toàn bộ</p>
+                                            <p className="mt-1 text-2xl font-bold text-amber-700 dark:text-amber-300">{avgScore}</p>
+                                        </div>
+                                        <div className="rounded-xl bg-green-50 dark:bg-green-900/20 px-4 py-3">
+                                            <p className="text-xs text-green-600 dark:text-green-400">Đạt ≥ 80 điểm</p>
+                                            <p className="mt-1 text-2xl font-bold text-green-700 dark:text-green-300">{passCount}</p>
+                                        </div>
+                                    </div>
+
+                                    {/* Table */}
+                                    <div className="overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
+                                        <div className="overflow-x-auto">
+                                            <table className="min-w-full text-sm">
+                                                <thead className="bg-gray-50 dark:bg-gray-800/80">
+                                                    <tr className="text-left text-gray-600 dark:text-gray-300">
+                                                        <th className="w-8 px-3 py-3" />
+                                                        <th className="px-5 py-3 font-semibold">Nhân viên</th>
+                                                        <th className="px-5 py-3 font-semibold">Phòng ban</th>
+                                                        <th className="px-5 py-3 font-semibold text-center">Bài đã làm</th>
+                                                        <th className="px-5 py-3 font-semibold text-center">Điểm TB</th>
+                                                        <th className="px-5 py-3 font-semibold text-center">Điểm cao nhất</th>
+                                                        <th className="px-5 py-3 font-semibold">Xếp loại</th>
+                                                        <th className="px-5 py-3 font-semibold">Lần cuối</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-gray-200 dark:divide-gray-800">
+                                                    {filtered.length === 0 ? (
+                                                        <tr>
+                                                            <td colSpan={8} className="px-5 py-10 text-center text-sm text-gray-500 dark:text-gray-400">
+                                                                Không tìm thấy nhân viên phù hợp.
+                                                            </td>
+                                                        </tr>
+                                                    ) : filtered.map((row) => {
+                                                        const isExpanded = expandedRows.has(row.personId)
+                                                        const scoreColor = row.averageScore >= 80
+                                                            ? "text-green-600 dark:text-green-400"
+                                                            : row.averageScore >= 50
+                                                                ? "text-amber-600 dark:text-amber-400"
+                                                                : "text-red-500 dark:text-red-400"
+                                                        const rank = row.averageScore >= 80 ? "Xuất sắc" : row.averageScore >= 60 ? "Khá" : row.averageScore >= 40 ? "Trung bình" : "Cần cải thiện"
+                                                        const rankColor = row.averageScore >= 80
+                                                            ? "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300"
+                                                            : row.averageScore >= 60
+                                                                ? "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"
+                                                                : row.averageScore >= 40
+                                                                    ? "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300"
+                                                                    : "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300"
+
+                                                        return (
+                                                            <>
+                                                                <tr
+                                                                    key={row.personId}
+                                                                    className="bg-white dark:bg-gray-900 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
+                                                                    onClick={() => setExpandedRows((prev) => {
+                                                                        const next = new Set(prev)
+                                                                        if (next.has(row.personId)) next.delete(row.personId)
+                                                                        else next.add(row.personId)
+                                                                        return next
+                                                                    })}
+                                                                >
+                                                                    <td className="px-3 py-4 text-gray-400">
+                                                                        <ChevronRight className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-90" : ""}`} />
+                                                                    </td>
+                                                                    <td className="px-5 py-4 font-medium text-gray-900 dark:text-white">
+                                                                        <div className="flex items-center gap-2.5">
+                                                                            <div className={`h-8 w-8 rounded-full flex items-center justify-center text-xs font-bold text-white ${row.averageScore >= 80 ? "bg-green-500" : row.averageScore >= 60 ? "bg-blue-500" : row.averageScore >= 40 ? "bg-amber-500" : "bg-red-500"}`}>
+                                                                                {row.personName.split(" ").slice(-1)[0]?.[0] ?? "?"}
+                                                                            </div>
+                                                                            {row.personName}
+                                                                        </div>
+                                                                    </td>
+                                                                    <td className="px-5 py-4 text-gray-500 dark:text-gray-400">{row.teamName || row.teamId}</td>
+                                                                    <td className="px-5 py-4 text-center font-semibold text-gray-900 dark:text-white">{row.totalAttempts}</td>
+                                                                    <td className={`px-5 py-4 text-center text-lg font-bold ${scoreColor}`}>{row.averageScore}</td>
+                                                                    <td className={`px-5 py-4 text-center font-semibold ${scoreColor}`}>{row.highestScore}</td>
+                                                                    <td className="px-5 py-4">
+                                                                        <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${rankColor}`}>
+                                                                            {rank}
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="px-5 py-4 text-gray-500 dark:text-gray-400 text-xs">
+                                                                        {new Date(row.lastAttemptAt).toLocaleDateString("vi-VN")}
+                                                                    </td>
+                                                                </tr>
+
+                                                                {/* Expanded detail rows */}
+                                                                {isExpanded && row.attempts.map((att, i) => (
+                                                                    <tr key={`${row.personId}-${i}`} className="bg-gray-50/80 dark:bg-gray-800/40">
+                                                                        <td className="px-3 py-3" />
+                                                                        <td colSpan={2} className="px-5 py-3">
+                                                                            <div className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                                                                                {att.score >= 80
+                                                                                    ? <CheckCircle2 className="h-4 w-4 text-green-500 flex-shrink-0" />
+                                                                                    : <XCircle className="h-4 w-4 text-red-400 flex-shrink-0" />}
+                                                                                <span className="font-medium truncate max-w-[200px]" title={att.documentName}>{att.documentName}</span>
+                                                                                <span className="text-xs text-gray-400">— {att.quizTitle}</span>
+                                                                            </div>
+                                                                        </td>
+                                                                        <td className="px-5 py-3 text-center text-xs text-gray-500 dark:text-gray-400">
+                                                                            {att.correctAnswers}/{att.totalQuestions} câu
+                                                                        </td>
+                                                                        <td className={`px-5 py-3 text-center font-bold ${att.score >= 80 ? "text-green-600" : att.score >= 50 ? "text-amber-500" : "text-red-500"}`}>
+                                                                            {att.score}
+                                                                        </td>
+                                                                        <td className="px-5 py-3 text-center">
+                                                                            <div className="flex items-center justify-center">
+                                                                                <div className="h-1.5 w-24 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
+                                                                                    <div
+                                                                                        className={`h-full rounded-full ${att.score >= 80 ? "bg-green-500" : att.score >= 50 ? "bg-amber-400" : "bg-red-400"}`}
+                                                                                        style={{ width: `${att.score}%` }}
+                                                                                    />
+                                                                                </div>
+                                                                            </div>
+                                                                        </td>
+                                                                        <td className="px-5 py-3" />
+                                                                        <td className="px-5 py-3 text-xs text-gray-400">
+                                                                            {new Date(att.submittedAt).toLocaleDateString("vi-VN")}
+                                                                        </td>
+                                                                    </tr>
+                                                                ))}
+                                                            </>
+                                                        )
+                                                    })}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+                            )
+                        })()}
+                    </CardContent>
+                </Card>
             </div>
+
+            {/* ── Participant Detail Modal ────────────────────────────── */}
+            {showParticipantModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+                    <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] flex flex-col">
+                        {/* Header */}
+                        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-200 dark:border-gray-700">
+                            <div>
+                                <h2 className="text-lg font-bold text-gray-900 dark:text-white">Chi tiết tham gia kiểm tra</h2>
+                                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                                    {quizReport.length} đã tham gia · {nonParticipants.length} chưa tham gia
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => setShowParticipantModal(false)}
+                                className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-600 transition-colors"
+                            >
+                                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </div>
+
+                        {/* Body */}
+                        <div className="overflow-y-auto flex-1 px-6 py-4 space-y-5">
+                            {(() => {
+                                const officeParticipants = quizReport.filter((row) => {
+                                    const p = people.find((p) => p.id === row.personId)
+                                    return p?.role !== "Nhân viên cửa hàng"
+                                })
+                                const storeParticipants = quizReport.filter((row) => {
+                                    const p = people.find((p) => p.id === row.personId)
+                                    return p?.role === "Nhân viên cửa hàng"
+                                })
+                                const officeNonParticipants = nonParticipants.filter((p) => p.role !== "Nhân viên cửa hàng")
+                                const storeNonParticipants = nonParticipants.filter((p) => p.role === "Nhân viên cửa hàng")
+
+                                const renderParticipantRow = (row: QuizReportRow) => {
+                                    const scoreColor = row.averageScore >= 80
+                                        ? "text-green-600 dark:text-green-400"
+                                        : row.averageScore >= 50
+                                            ? "text-amber-600 dark:text-amber-400"
+                                            : "text-red-500 dark:text-red-400"
+                                    const avatarBg = row.averageScore >= 80 ? "bg-green-500" : row.averageScore >= 60 ? "bg-blue-500" : row.averageScore >= 40 ? "bg-amber-500" : "bg-red-500"
+                                    return (
+                                        <div key={row.personId} className="flex items-center gap-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 px-4 py-2.5">
+                                            <div className={`h-8 w-8 rounded-full flex items-center justify-center text-xs font-bold text-white flex-shrink-0 ${avatarBg}`}>
+                                                {row.personName.split(" ").slice(-1)[0]?.[0] ?? "?"}
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <p className="text-sm font-medium text-gray-900 dark:text-white truncate">{row.personName}</p>
+                                                <p className="text-xs text-gray-500 dark:text-gray-400">{row.teamName || row.teamId} · {row.totalAttempts} bài</p>
+                                            </div>
+                                            <div className="text-right flex-shrink-0">
+                                                <p className={`text-base font-bold ${scoreColor}`}>{row.averageScore}<span className="text-xs font-normal text-gray-400">đ</span></p>
+                                                <p className="text-[10px] text-gray-400">TB</p>
+                                            </div>
+                                        </div>
+                                    )
+                                }
+
+                                const renderNonParticipantRow = (person: (typeof nonParticipants)[number]) => {
+                                    const team = getTeamById(person.team, teams)
+                                    return (
+                                        <div key={person.id} className="flex items-center gap-3 rounded-xl border border-dashed border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-4 py-2.5">
+                                            <div className="h-8 w-8 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center text-xs font-bold text-gray-500 dark:text-gray-400 flex-shrink-0">
+                                                {person.name.split(" ").slice(-1)[0]?.[0] ?? "?"}
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <p className="text-sm font-medium text-gray-700 dark:text-gray-300 truncate">{person.name}</p>
+                                                <p className="text-xs text-gray-400 dark:text-gray-500">{team?.name ?? person.team}</p>
+                                            </div>
+                                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 flex-shrink-0">
+                                                Chưa làm bài
+                                            </span>
+                                        </div>
+                                    )
+                                }
+
+                                return (
+                                    <>
+                                        {/* Đã tham gia */}
+                                        <div>
+                                            <div className="flex items-center gap-2 mb-3">
+                                                <CheckCircle2 className="h-4 w-4 text-green-500" />
+                                                <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                                                    Đã tham gia ({quizReport.length})
+                                                </h3>
+                                            </div>
+                                            {quizReport.length === 0 ? (
+                                                <p className="text-xs text-gray-400 pl-6">Chưa có nhân viên nào làm bài.</p>
+                                            ) : (
+                                                <div className="space-y-4">
+                                                    {officeParticipants.length > 0 && (
+                                                        <div>
+                                                            <p className="text-[11px] font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wide mb-2 pl-1">
+                                                                Nhân viên văn phòng ({officeParticipants.length})
+                                                            </p>
+                                                            <div className="space-y-2">{officeParticipants.map(renderParticipantRow)}</div>
+                                                        </div>
+                                                    )}
+                                                    {storeParticipants.length > 0 && (
+                                                        <div>
+                                                            <p className="text-[11px] font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wide mb-2 pl-1">
+                                                                Nhân viên cửa hàng ({storeParticipants.length})
+                                                            </p>
+                                                            <div className="space-y-2">{storeParticipants.map(renderParticipantRow)}</div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {/* Chưa tham gia */}
+                                        <div>
+                                            <div className="flex items-center gap-2 mb-3">
+                                                <XCircle className="h-4 w-4 text-gray-400" />
+                                                <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                                                    Chưa tham gia ({nonParticipants.length})
+                                                </h3>
+                                            </div>
+                                            {nonParticipants.length === 0 ? (
+                                                <div className="flex items-center gap-2 text-xs text-green-600 dark:text-green-400 pl-6">
+                                                    <CheckCircle2 className="h-3.5 w-3.5" />
+                                                    Tất cả nhân viên đã hoàn thành ít nhất 1 bài kiểm tra!
+                                                </div>
+                                            ) : (
+                                                <div className="space-y-4">
+                                                    {officeNonParticipants.length > 0 && (
+                                                        <div>
+                                                            <p className="text-[11px] font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wide mb-2 pl-1">
+                                                                Nhân viên văn phòng ({officeNonParticipants.length})
+                                                            </p>
+                                                            <div className="space-y-2">{officeNonParticipants.map(renderNonParticipantRow)}</div>
+                                                        </div>
+                                                    )}
+                                                    {storeNonParticipants.length > 0 && (
+                                                        <div>
+                                                            <p className="text-[11px] font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wide mb-2 pl-1">
+                                                                Nhân viên cửa hàng ({storeNonParticipants.length})
+                                                            </p>
+                                                            <div className="space-y-2">{storeNonParticipants.map(renderNonParticipantRow)}</div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </>
+                                )
+                            })()}
+                        </div>
+
+                        {/* Footer */}
+                        <div className="px-6 py-4 border-t border-gray-200 dark:border-gray-700">
+                            <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                                <GraduationCap className="h-3.5 w-3.5" />
+                                Tỷ lệ tham gia: <span className="font-semibold text-gray-900 dark:text-white ml-1">
+                                    {accessiblePeople.length === 0 ? 0 : Math.round((quizReport.length / accessiblePeople.length) * 100)}%
+                                </span>
+                                <div className="flex-1 mx-2 h-1.5 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
+                                    <div
+                                        className="h-full rounded-full bg-violet-500 transition-all"
+                                        style={{ width: `${accessiblePeople.length === 0 ? 0 : Math.round((quizReport.length / accessiblePeople.length) * 100)}%` }}
+                                    />
+                                </div>
+                                <span>{quizReport.length}/{accessiblePeople.length}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     )
 }

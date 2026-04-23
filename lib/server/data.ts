@@ -109,6 +109,8 @@ type DbDocument = {
   url?: string;
   visibility?: "team" | "office" | "store" | "specific";
   visibleToPersonIds?: string[];
+  isLearningMaterial?: boolean;
+  learningPlan?: Document["learningPlan"];
 };
 
 type DbFolder = {
@@ -165,6 +167,51 @@ type DbTest = {
   questions: string[];
   durationMinutes: number;
   createdByPersonId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type DbQuizQuestion = {
+  text: string;
+  options: string[];
+  correctIndex: number;
+  explanation?: string;
+};
+
+type DbLearningQuiz = {
+  _id: string;
+  documentId: string;
+  title: string;
+  description?: string;
+  questions: DbQuizQuestion[];
+  durationMinutes: number;
+  createdByPersonId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type DbQuizAttempt = {
+  _id: string;
+  quizId: string;
+  documentId: string;
+  personId: string;
+  answers: number[];
+  score: number;
+  correctAnswers: number;
+  totalQuestions: number;
+  startedAt: string;
+  submittedAt: string;
+};
+
+type DbLearningProgress = {
+  _id: string;
+  personId: string;
+  documentId: string;
+  startedAt?: string;
+  completedAt?: string;
+  activeStepIndex?: number;
+  completedStepIds?: string[];
+  startedAtByStepId?: Record<string, string>;
   createdAt: string;
   updatedAt: string;
 };
@@ -322,6 +369,60 @@ export type TestRecord = {
   createdByPersonId: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type QuizQuestion = {
+  text: string;
+  options: string[];
+  correctIndex?: number;
+  explanation?: string;
+};
+
+export type LearningQuizRecord = {
+  id: string;
+  documentId: string;
+  title: string;
+  description: string;
+  questions: QuizQuestion[];
+  durationMinutes: number;
+  createdByPersonId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type QuizAttemptRecord = {
+  id: string;
+  quizId: string;
+  documentId: string;
+  personId: string;
+  personName?: string;
+  answers: number[];
+  score: number;
+  correctAnswers: number;
+  totalQuestions: number;
+  startedAt: string;
+  submittedAt: string;
+  reviewQuestions?: QuizQuestion[];
+};
+
+export type LearningProgressRecord = {
+  id: string;
+  personId: string;
+  documentId: string;
+  startedAt?: string;
+  completedAt?: string;
+  activeStepIndex: number;
+  completedStepIds: string[];
+  startedAtByStepId: Record<string, string>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TeamLearningStatusRow = {
+  personId: string;
+  personName: string;
+  team: string;
+  status: "completed" | "in_progress" | "not_started";
 };
 
 const supportedTeamIds = companyTeams.map((team) => team.id);
@@ -832,7 +933,60 @@ function mapDbDocument(document: DbDocument): Document {
     description: document.description,
     url: document.url,
     visibility: document.visibility ?? "team",
-    visibleToPersonIds: document.visibleToPersonIds ?? []
+    visibleToPersonIds: document.visibleToPersonIds ?? [],
+    isLearningMaterial: document.isLearningMaterial ?? false,
+    learningPlan: document.learningPlan
+  };
+}
+
+function mapDbLearningQuiz(quiz: DbLearningQuiz, sanitize: boolean): LearningQuizRecord {
+  return {
+    id: quiz._id,
+    documentId: quiz.documentId,
+    title: quiz.title,
+    description: quiz.description ?? "",
+    questions: quiz.questions.map((q) => ({
+      text: q.text,
+      options: q.options,
+      ...(sanitize ? {} : { correctIndex: q.correctIndex }),
+      ...(sanitize ? {} : { explanation: q.explanation }),
+    })),
+    durationMinutes: quiz.durationMinutes,
+    createdByPersonId: quiz.createdByPersonId,
+    createdAt: quiz.createdAt,
+    updatedAt: quiz.updatedAt,
+  };
+}
+
+function mapDbQuizAttempt(attempt: DbQuizAttempt, personName?: string, reviewQuestions?: QuizQuestion[]): QuizAttemptRecord {
+  return {
+    id: attempt._id,
+    quizId: attempt.quizId,
+    documentId: attempt.documentId,
+    personId: attempt.personId,
+    personName,
+    answers: attempt.answers,
+    score: attempt.score,
+    correctAnswers: attempt.correctAnswers,
+    totalQuestions: attempt.totalQuestions,
+    startedAt: attempt.startedAt,
+    submittedAt: attempt.submittedAt,
+    reviewQuestions,
+  };
+}
+
+function mapDbLearningProgress(progress: DbLearningProgress): LearningProgressRecord {
+  return {
+    id: progress._id,
+    personId: progress.personId,
+    documentId: progress.documentId,
+    startedAt: progress.startedAt,
+    completedAt: progress.completedAt,
+    activeStepIndex: progress.activeStepIndex ?? 0,
+    completedStepIds: progress.completedStepIds ?? [],
+    startedAtByStepId: progress.startedAtByStepId ?? {},
+    createdAt: progress.createdAt,
+    updatedAt: progress.updatedAt,
   };
 }
 
@@ -1054,6 +1208,47 @@ function canManageSchedules(actor: SessionActor) {
 
 function canManageTests(actor: SessionActor) {
   return actor.user.role === "leader" && actor.user.department === "Vận hành";
+}
+
+function canManageLearningContent(actor: SessionActor) {
+  return actor.isLeader || actor.isAdmin;
+}
+
+function isStorePerson(person: Person) {
+  const normalizedRole = normalizeIdentityValue(person.role);
+  return (
+    person.team === "store" ||
+    normalizedRole.includes("cửa hàng") ||
+    normalizedRole.includes("cua hang")
+  );
+}
+
+function isEmployeePerson(person: Person) {
+  const normalizedRole = normalizeIdentityValue(person.role);
+  return (
+    !normalizedRole.includes("leader") &&
+    !normalizedRole.includes("admin") &&
+    !normalizedRole.includes("ceo")
+  );
+}
+
+function canPersonAccessDocument(
+  person: Person,
+  document: DbDocument,
+  ownerTeamByPersonId: Map<string, string>
+) {
+  if (document.visibility === "specific") {
+    return (document.visibleToPersonIds ?? []).includes(person.id);
+  }
+  if (document.visibility === "store") {
+    return isStorePerson(person);
+  }
+  if (document.visibility === "office") {
+    return !isStorePerson(person);
+  }
+  const ownerTeam = ownerTeamByPersonId.get(document.ownerId);
+  if (!ownerTeam) return true;
+  return person.team === ownerTeam;
 }
 
 function canManageScheduleAttendees(actor: SessionActor, attendeeIds: string[]) {
@@ -2348,7 +2543,9 @@ export async function createDocumentRecord(
     description: input.description,
     url: input.url,
     visibility: normalizedVisibility,
-    visibleToPersonIds: normalizedVisibleToPersonIds
+    visibleToPersonIds: normalizedVisibleToPersonIds,
+    isLearningMaterial: Boolean(input.isLearningMaterial),
+    learningPlan: input.learningPlan,
   };
 
   await db.collection<DbDocument>("documents").insertOne(nextDocument);
@@ -2377,6 +2574,12 @@ export async function updateDocumentRecord(
   if (updates.isStarred !== undefined) payload.isStarred = updates.isStarred;
   if (updates.description !== undefined) payload.description = updates.description;
   if (updates.thumbnail !== undefined) payload.thumbnail = updates.thumbnail;
+  if (updates.isLearningMaterial !== undefined && canManageLearningContent(actor)) {
+    payload.isLearningMaterial = updates.isLearningMaterial;
+  }
+  if (updates.learningPlan !== undefined && canManageLearningContent(actor)) {
+    payload.learningPlan = updates.learningPlan;
+  }
   if (isAdminActor) {
     if (updates.visibility !== undefined) payload.visibility = updates.visibility;
     if (updates.visibleToPersonIds !== undefined) payload.visibleToPersonIds = updates.visibleToPersonIds;
@@ -2651,6 +2854,453 @@ export async function getChatThreadParticipantIds(sessionUserId: string | null |
   }
 
   return thread.participantIds;
+}
+
+export async function getLearningQuiz(
+  sessionUserId: string | null | undefined,
+  documentId: string
+): Promise<LearningQuizRecord | null> {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) throw new Error("Unauthorized");
+
+  const db = await getMongoDb();
+  const quiz = await db.collection<DbLearningQuiz>("learning_quizzes").findOne({ documentId });
+  if (!quiz) return null;
+
+  const sanitize = !canManageLearningContent(actor);
+  return mapDbLearningQuiz(quiz, sanitize);
+}
+
+export async function createLearningQuiz(
+  sessionUserId: string | null | undefined,
+  input: {
+    documentId: string;
+    title: string;
+    description?: string;
+    questions: Array<{ text: string; options: string[]; correctIndex: number; explanation?: string }>;
+    durationMinutes: number;
+  }
+): Promise<LearningQuizRecord> {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) throw new Error("Unauthorized");
+  if (!canManageLearningContent(actor)) throw new Error("Forbidden");
+
+  const db = await getMongoDb();
+  const existing = await db.collection<DbLearningQuiz>("learning_quizzes").findOne({ documentId: input.documentId });
+  if (existing) throw new Error("Quiz đã tồn tại cho tài liệu này.");
+
+  const now = new Date().toISOString();
+  const record: DbLearningQuiz = {
+    _id: `lquiz_${Date.now()}`,
+    documentId: input.documentId,
+    title: input.title.trim(),
+    description: input.description?.trim() ?? "",
+    questions: input.questions.map((q) => ({
+      text: q.text.trim(),
+      options: q.options.map((o) => o.trim()),
+      correctIndex: q.correctIndex,
+      explanation: q.explanation?.trim() ?? "",
+    })),
+    durationMinutes: Math.max(5, input.durationMinutes),
+    createdByPersonId: actor.person.id,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  await db.collection<DbLearningQuiz>("learning_quizzes").insertOne(record);
+  return mapDbLearningQuiz(record, false);
+}
+
+export async function updateLearningQuiz(
+  sessionUserId: string | null | undefined,
+  quizId: string,
+  updates: {
+    title?: string;
+    description?: string;
+    questions?: Array<{ text: string; options: string[]; correctIndex: number; explanation?: string }>;
+    durationMinutes?: number;
+  }
+): Promise<LearningQuizRecord | null> {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) throw new Error("Unauthorized");
+  if (!canManageLearningContent(actor)) throw new Error("Forbidden");
+
+  const db = await getMongoDb();
+  const payload: Partial<DbLearningQuiz> = { updatedAt: new Date().toISOString() };
+  if (updates.title) payload.title = updates.title.trim();
+  if (updates.description !== undefined) payload.description = updates.description.trim();
+  if (updates.questions) {
+    payload.questions = updates.questions.map((q) => ({
+      text: q.text.trim(),
+      options: q.options.map((o) => o.trim()),
+      correctIndex: q.correctIndex,
+      explanation: q.explanation?.trim() ?? "",
+    }));
+  }
+  if (updates.durationMinutes !== undefined) payload.durationMinutes = Math.max(5, updates.durationMinutes);
+
+  await db.collection<DbLearningQuiz>("learning_quizzes").updateOne({ _id: quizId }, { $set: payload });
+  const updated = await db.collection<DbLearningQuiz>("learning_quizzes").findOne({ _id: quizId });
+  return updated ? mapDbLearningQuiz(updated, false) : null;
+}
+
+export async function deleteLearningQuiz(
+  sessionUserId: string | null | undefined,
+  quizId: string
+): Promise<boolean> {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) throw new Error("Unauthorized");
+  if (!canManageLearningContent(actor)) throw new Error("Forbidden");
+
+  const db = await getMongoDb();
+  const result = await db.collection<DbLearningQuiz>("learning_quizzes").deleteOne({ _id: quizId });
+  return result.deletedCount > 0;
+}
+
+export async function submitQuizAttempt(
+  sessionUserId: string | null | undefined,
+  documentId: string,
+  answers: number[],
+  startedAt: string
+): Promise<QuizAttemptRecord> {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) throw new Error("Unauthorized");
+
+  const db = await getMongoDb();
+  const existingAttempt = await db.collection<DbQuizAttempt>("quiz_attempts").findOne({
+    documentId,
+    personId: actor.person.id,
+  });
+  if (existingAttempt) throw new Error("Bạn đã hoàn thành bài kiểm tra này rồi.");
+
+  const quiz = await db.collection<DbLearningQuiz>("learning_quizzes").findOne({ documentId });
+  if (!quiz) throw new Error("Không tìm thấy bài kiểm tra.");
+
+  let correctAnswers = 0;
+  for (let i = 0; i < quiz.questions.length; i++) {
+    if (answers[i] === quiz.questions[i].correctIndex) correctAnswers++;
+  }
+  const score = quiz.questions.length > 0 ? Math.round((correctAnswers / quiz.questions.length) * 100) : 0;
+
+  const now = new Date().toISOString();
+  const attempt: DbQuizAttempt = {
+    _id: `attempt_${Date.now()}`,
+    quizId: quiz._id,
+    documentId,
+    personId: actor.person.id,
+    answers,
+    score,
+    correctAnswers,
+    totalQuestions: quiz.questions.length,
+    startedAt,
+    submittedAt: now,
+  };
+
+  await db.collection<DbQuizAttempt>("quiz_attempts").insertOne(attempt);
+
+  const reviewQuestions = quiz.questions.map((q) => ({
+    text: q.text,
+    options: q.options,
+    correctIndex: q.correctIndex,
+    explanation: q.explanation,
+  }));
+
+  return mapDbQuizAttempt(attempt, actor.person.name, reviewQuestions);
+}
+
+export async function getMyQuizAttempt(
+  sessionUserId: string | null | undefined,
+  documentId: string
+): Promise<QuizAttemptRecord | null> {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) throw new Error("Unauthorized");
+
+  const db = await getMongoDb();
+  const attempt = await db.collection<DbQuizAttempt>("quiz_attempts").findOne({
+    documentId,
+    personId: actor.person.id,
+  });
+  return attempt ? mapDbQuizAttempt(attempt) : null;
+}
+
+export async function getTeamQuizAttempts(
+  sessionUserId: string | null | undefined,
+  documentId: string
+): Promise<QuizAttemptRecord[]> {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) throw new Error("Unauthorized");
+  if (!canManageLearningContent(actor)) throw new Error("Forbidden");
+
+  const db = await getMongoDb();
+  const attempts = await db
+    .collection<DbQuizAttempt>("quiz_attempts")
+    .find({ documentId }, { sort: { submittedAt: -1 } })
+    .toArray();
+
+  if (attempts.length === 0) return [];
+
+  const personIds = [...new Set(attempts.map((a) => a.personId))];
+  const people = await db
+    .collection<DbPerson>("people")
+    .find({ _id: { $in: personIds } })
+    .toArray();
+  const personNameMap = new Map(people.map((p) => [p._id, p.name]));
+
+  return attempts.map((attempt) => mapDbQuizAttempt(attempt, personNameMap.get(attempt.personId) ?? "Unknown"));
+}
+
+export async function getMyLearningProgress(
+  sessionUserId: string | null | undefined
+): Promise<LearningProgressRecord[]> {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) throw new Error("Unauthorized");
+
+  const db = await getMongoDb();
+  const progresses = await db
+    .collection<DbLearningProgress>("learning_progress")
+    .find({ personId: actor.person.id }, { sort: { updatedAt: -1 } })
+    .toArray();
+
+  return progresses.map(mapDbLearningProgress);
+}
+
+export async function upsertMyLearningProgress(
+  sessionUserId: string | null | undefined,
+  input: {
+    documentId: string;
+    startedAt?: string | null;
+    completedAt?: string | null;
+    activeStepIndex?: number;
+    completedStepIds?: string[];
+    startedAtByStepId?: Record<string, string>;
+  }
+): Promise<LearningProgressRecord> {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) throw new Error("Unauthorized");
+
+  const db = await getMongoDb();
+  const [document, people] = await Promise.all([
+    db.collection<DbDocument>("documents").findOne({ _id: input.documentId }),
+    db.collection<DbPerson>("people").find({}, { projection: { _id: 1, teamId: 1 } }).toArray(),
+  ]);
+
+  if (!document) throw new Error("Document not found.");
+
+  const ownerTeamByPersonId = new Map(
+    people.map((person) => [person._id, normalizeTeamId(person.teamId)])
+  );
+  if (!canPersonAccessDocument(actor.person, document, ownerTeamByPersonId)) {
+    throw new Error("Forbidden");
+  }
+
+  const now = new Date().toISOString();
+  const query = { personId: actor.person.id, documentId: input.documentId };
+  const existing = await db.collection<DbLearningProgress>("learning_progress").findOne(query);
+
+  const payload: Partial<DbLearningProgress> = {
+    updatedAt: now,
+    activeStepIndex: Math.max(0, input.activeStepIndex ?? 0),
+    completedStepIds: Array.isArray(input.completedStepIds)
+      ? [...new Set(input.completedStepIds)]
+      : [],
+    startedAtByStepId: input.startedAtByStepId ?? {},
+  };
+
+  if (input.startedAt !== undefined) {
+    payload.startedAt = input.startedAt || undefined;
+  } else if (!existing?.startedAt) {
+    payload.startedAt = now;
+  }
+
+  if (input.completedAt !== undefined) {
+    payload.completedAt = input.completedAt || undefined;
+  }
+
+  if (!existing) {
+    payload.createdAt = now;
+  }
+
+  await db.collection<DbLearningProgress>("learning_progress").updateOne(
+    query,
+    { $set: payload, ...(existing ? {} : { $setOnInsert: { _id: `lp_${Date.now()}_${randomInt(1000, 9999)}` } }) },
+    { upsert: true }
+  );
+
+  const saved = await db.collection<DbLearningProgress>("learning_progress").findOne(query);
+  if (!saved) throw new Error("Failed to save learning progress.");
+  return mapDbLearningProgress(saved);
+}
+
+export async function getTeamLearningStatusesForDocument(
+  sessionUserId: string | null | undefined,
+  documentId: string
+): Promise<TeamLearningStatusRow[]> {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) throw new Error("Unauthorized");
+  if (!canManageLearningContent(actor)) throw new Error("Forbidden");
+
+  const db = await getMongoDb();
+  const [document, allPeople] = await Promise.all([
+    db.collection<DbDocument>("documents").findOne({ _id: documentId }),
+    db.collection<DbPerson>("people").find({}).toArray(),
+  ]);
+  if (!document) return [];
+
+  const mappedPeople = allPeople.map(mapDbPerson);
+  const ownerTeamByPersonId = new Map(
+    mappedPeople.map((person) => [person.id, person.team])
+  );
+  const visibleTeamMemberIds = new Set(actor.teamMembers.map((member) => member.id));
+  const targetPeople = mappedPeople.filter((person) => {
+    if (!visibleTeamMemberIds.has(person.id)) return false;
+    if (!isEmployeePerson(person)) return false;
+    return canPersonAccessDocument(person, document, ownerTeamByPersonId);
+  });
+
+  if (targetPeople.length === 0) return [];
+
+  const targetPersonIds = targetPeople.map((person) => person.id);
+  const [progresses, attempts] = await Promise.all([
+    db
+      .collection<DbLearningProgress>("learning_progress")
+      .find({ documentId, personId: { $in: targetPersonIds } })
+      .toArray(),
+    db
+      .collection<DbQuizAttempt>("quiz_attempts")
+      .find({ documentId, personId: { $in: targetPersonIds } })
+      .toArray(),
+  ]);
+
+  const progressByPersonId = new Map(progresses.map((progress) => [progress.personId, progress]));
+  const attemptPersonIdSet = new Set(attempts.map((attempt) => attempt.personId));
+
+  return targetPeople
+    .map((person) => {
+      const progress = progressByPersonId.get(person.id);
+      const hasStarted =
+        Boolean(progress?.startedAt) ||
+        (progress?.activeStepIndex ?? 0) > 0 ||
+        (progress?.completedStepIds?.length ?? 0) > 0 ||
+        Object.keys(progress?.startedAtByStepId ?? {}).length > 0;
+      const completed = Boolean(progress?.completedAt) || attemptPersonIdSet.has(person.id);
+
+      return {
+        personId: person.id,
+        personName: person.name,
+        team: person.team,
+        status: completed ? "completed" : hasStarted ? "in_progress" : "not_started",
+      } satisfies TeamLearningStatusRow;
+    })
+    .sort((a, b) => a.personName.localeCompare(b.personName, "vi"));
+}
+
+export type QuizReportAttempt = {
+  quizId: string;
+  documentId: string;
+  documentName: string;
+  quizTitle: string;
+  score: number;
+  correctAnswers: number;
+  totalQuestions: number;
+  submittedAt: string;
+};
+
+export type QuizReportRow = {
+  personId: string;
+  personName: string;
+  teamId: string;
+  teamName: string;
+  totalAttempts: number;
+  averageScore: number;
+  highestScore: number;
+  lastAttemptAt: string;
+  attempts: QuizReportAttempt[];
+};
+
+export async function getQuizReport(
+  sessionUserId: string | null | undefined
+): Promise<QuizReportRow[]> {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) throw new Error("Unauthorized");
+
+  const db = await getMongoDb();
+
+  // Determine which personIds we can see
+  let personIdFilter: string[] | null = null;
+  if (actor.isAdmin) {
+    personIdFilter = null; // all
+  } else if (actor.isLeader) {
+    personIdFilter = actor.teamMembers.map((m) => m.id);
+  } else {
+    personIdFilter = [actor.person.id];
+  }
+
+  const attemptQuery = personIdFilter ? { personId: { $in: personIdFilter } } : {};
+  const attempts = await db
+    .collection<DbQuizAttempt>("quiz_attempts")
+    .find(attemptQuery, { sort: { submittedAt: -1 } })
+    .toArray();
+
+  if (attempts.length === 0) return [];
+
+  // Load quizzes and documents in parallel
+  const quizIds = [...new Set(attempts.map((a) => a.quizId))];
+  const docIds = [...new Set(attempts.map((a) => a.documentId))];
+  const personIds = [...new Set(attempts.map((a) => a.personId))];
+
+  const [quizzes, documents, people, companyTeams] = await Promise.all([
+    db.collection<DbLearningQuiz>("learning_quizzes").find({ _id: { $in: quizIds } }).toArray(),
+    db.collection<DbDocument>("documents").find({ _id: { $in: docIds } }, { projection: { _id: 1, name: 1 } }).toArray(),
+    db.collection<DbPerson>("people").find({ _id: { $in: personIds } }).toArray(),
+    db.collection<DbCompanyTeam>("company_teams").find({}).toArray(),
+  ]);
+
+  const quizMap = new Map(quizzes.map((q) => [q._id, q]));
+  const docMap = new Map(documents.map((d) => [d._id, d.name]));
+  const personMap = new Map(people.map((p) => [p._id, p]));
+  const teamNameMap = new Map(companyTeams.map((t) => [t._id, t.name]));
+
+  // Group attempts by person
+  const grouped = new Map<string, DbQuizAttempt[]>();
+  for (const attempt of attempts) {
+    const list = grouped.get(attempt.personId) ?? [];
+    list.push(attempt);
+    grouped.set(attempt.personId, list);
+  }
+
+  const rows: QuizReportRow[] = [];
+  for (const [personId, personAttempts] of grouped) {
+    const person = personMap.get(personId);
+    if (!person) continue;
+
+    const attemptDetails: QuizReportAttempt[] = personAttempts.map((a) => ({
+      quizId: a.quizId,
+      documentId: a.documentId,
+      documentName: docMap.get(a.documentId) ?? "Tài liệu",
+      quizTitle: quizMap.get(a.quizId)?.title ?? "Quiz",
+      score: a.score,
+      correctAnswers: a.correctAnswers,
+      totalQuestions: a.totalQuestions,
+      submittedAt: a.submittedAt,
+    }));
+
+    const scores = personAttempts.map((a) => a.score);
+    rows.push({
+      personId,
+      personName: person.name,
+      teamId: person.teamId,
+      teamName: teamNameMap.get(person.teamId) ?? person.teamId,
+      totalAttempts: personAttempts.length,
+      averageScore: Math.round(scores.reduce((s, v) => s + v, 0) / scores.length),
+      highestScore: Math.max(...scores),
+      lastAttemptAt: personAttempts[0]!.submittedAt,
+      attempts: attemptDetails,
+    });
+  }
+
+  // Sort by average score desc
+  rows.sort((a, b) => b.averageScore - a.averageScore);
+  return rows;
 }
 
 export async function deleteChatMessage(sessionUserId: string | null | undefined, threadId: string, messageId: string) {

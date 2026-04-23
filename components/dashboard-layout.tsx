@@ -187,7 +187,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         { name: "My Task", icon: CheckCircle, path: "/" },
         { name: "People", icon: Users, path: "/people" },
         { name: "Chats", icon: MessageSquare, path: "/chats" },
-        { name: "Documents", icon: FileText, path: "/documents" },
+        { name: "E-learning", icon: FileText, path: "/documents" },
         { name: "Receipts", icon: Receipt, path: "/recipts" },
     ]
     const isOperationsLeader = user?.role === "leader" && user?.department === "Vận hành"

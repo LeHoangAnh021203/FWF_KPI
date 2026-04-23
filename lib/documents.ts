@@ -7,6 +7,30 @@ export interface Folder {
   updatedAt: string;
 }
 
+export type LearningStepMedia = {
+  id: string;
+  type: "video";
+  url: string;
+  mimeType?: string;
+  fileName?: string;
+};
+
+export type LearningStep = {
+  id: string;
+  title: string;
+  kind: "page" | "slide";
+  pageNumber?: number;
+  slideNumber?: number;
+  estimatedSeconds: number;
+  media?: LearningStepMedia[];
+};
+
+export type LearningPlan = {
+  sourceType: "pdf" | "pptx";
+  steps: LearningStep[];
+  generatedAt: string;
+};
+
 export interface Document {
   id: string;
   name: string;
@@ -36,6 +60,8 @@ export interface Document {
   url?: string;
   visibility: "team" | "office" | "store" | "specific";
   visibleToPersonIds: string[];
+  isLearningMaterial?: boolean;
+  learningPlan?: LearningPlan;
 }
 
 export const documentTypes = {
@@ -127,4 +153,3 @@ export const formatDate = (dateString: string): string => {
     day: "numeric",
   });
 };
-

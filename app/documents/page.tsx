@@ -40,7 +40,111 @@ import {
     Building2,
     X,
     Plus,
+    BookOpen,
+    ClipboardCheck,
+    Timer,
+    CheckCircle2,
+    XCircle,
+    Trophy,
+    BarChart2,
+    ChevronRight,
+    Pencil,
+    Users,
+    GraduationCap,
 } from "lucide-react"
+
+type LearningQuizQuestion = {
+    text: string
+    options: string[]
+    correctIndex?: number
+    explanation?: string
+}
+
+type LearningQuizRecord = {
+    id: string
+    documentId: string
+    title: string
+    description: string
+    questions: LearningQuizQuestion[]
+    durationMinutes: number
+    createdByPersonId: string
+    createdAt: string
+    updatedAt: string
+}
+
+type QuizAttemptRecord = {
+    id: string
+    quizId: string
+    documentId: string
+    personId: string
+    personName?: string
+    answers: number[]
+    score: number
+    correctAnswers: number
+    totalQuestions: number
+    startedAt: string
+    submittedAt: string
+    reviewQuestions?: LearningQuizQuestion[]
+}
+
+type QuizCreateQuestion = {
+    text: string
+    options: [string, string, string, string]
+    correctIndex: number
+    explanation: string
+}
+
+interface QuizCreateState {
+    open: boolean
+    documentId: string
+    documentName: string
+    existingQuizId: string | null
+    title: string
+    description: string
+    durationMinutes: string
+    questions: QuizCreateQuestion[]
+    isNewDocument?: boolean
+}
+
+interface QuizTakeState {
+    open: boolean
+    quiz: LearningQuizRecord | null
+    documentId: string
+    answers: number[]
+    currentQuestion: number
+    startedAt: string
+    timeLeftSeconds: number
+    isSubmitting: boolean
+    isSubmitted: boolean
+    result: QuizAttemptRecord | null
+}
+
+interface QuizResultsState {
+    open: boolean
+    documentId: string
+    documentName: string
+    attempts: QuizAttemptRecord[]
+    learningStatuses: LearningStatusRow[]
+    isLoading: boolean
+}
+
+type LearningStatusType = "completed" | "in_progress" | "not_started"
+
+type LearningStatusRow = {
+    personId: string
+    personName: string
+    team: string
+    status: LearningStatusType
+}
+
+type LearningProgressRecord = {
+    documentId: string
+    startedAt?: string
+    completedAt?: string
+    activeStepIndex: number
+    completedStepIds: string[]
+    startedAtByStepId: Record<string, string>
+}
 
 type SortBy = "name" | "date" | "size" | "type" | "owner"
 type GroupBy = "none" | "type" | "date" | "owner" | "folder"
@@ -60,8 +164,6 @@ interface NewFolderDialogState {
 interface CreateDocumentDialogState {
     open: boolean
     name: string
-    link: string
-    thumbnail: string
     visibility: DocVisibility
     file: File | null
     selectedOfficePersonIds: string[]
@@ -74,6 +176,33 @@ interface VisibilityDialogState {
     selectedOfficePersonIds: string[]
 }
 
+const LEARNING_REQUIRED_SECONDS = 30
+
+type LearningProgressState = {
+    completedDocIds: string[]
+    startedAtByDocId: Record<string, string>
+}
+
+type LearningPlanProgress = {
+    activeStepIndex: number
+    completedStepIds: string[]
+    startedAtByStepId: Record<string, string>
+}
+
+type LearningPlanProgressMap = Record<string, LearningPlanProgress>
+
+function buildDefaultPlanProgress(): LearningPlanProgress {
+    return {
+        activeStepIndex: 0,
+        completedStepIds: [],
+        startedAtByStepId: {},
+    }
+}
+
+function getLearningVideoProgressKey(docId: string, stepId?: string) {
+    return stepId ? `${docId}:${stepId}` : docId
+}
+
 function getDefaultVisibility(user: UserAccount | null): DocVisibility {
     if (user?.role === "ceo" || user?.role === "admin") return "office"
     return "team"
@@ -83,8 +212,6 @@ function buildDefaultCreateDocumentDialog(user: UserAccount | null): CreateDocum
     return {
         open: false,
         name: "",
-        link: "",
-        thumbnail: "",
         visibility: getDefaultVisibility(user),
         file: null,
         selectedOfficePersonIds: [],
@@ -125,7 +252,41 @@ export default function DocumentsPage() {
     )
     const [isSubmitting, setIsSubmitting] = useState(false)
 
+    // ── Learning / E-learning state ──────────────────────────────────
+    const [activeTab, setActiveTab] = useState<"all" | "learning">("all")
+    const [quizzes, setQuizzes] = useState<Record<string, LearningQuizRecord | null>>({})
+    const [myAttempts, setMyAttempts] = useState<Record<string, QuizAttemptRecord | null>>({})
+    const [learningDataLoaded, setLearningDataLoaded] = useState(false)
+
+    const defaultQuizCreate = (): QuizCreateState => ({
+        open: false, documentId: "", documentName: "", existingQuizId: null,
+        title: "", description: "", durationMinutes: "15",
+        questions: [{ text: "", options: ["", "", "", ""], correctIndex: 0, explanation: "" }],
+        isNewDocument: false,
+    })
+    const defaultQuizTake = (): QuizTakeState => ({
+        open: false, quiz: null, documentId: "", answers: [],
+        currentQuestion: 0, startedAt: "", timeLeftSeconds: 0,
+        isSubmitting: false, isSubmitted: false, result: null,
+    })
+
+    const [quizCreateDialog, setQuizCreateDialog] = useState<QuizCreateState>(defaultQuizCreate())
+    const [quizTakeModal, setQuizTakeModal] = useState<QuizTakeState>(defaultQuizTake())
+    const [quizResultsModal, setQuizResultsModal] = useState<QuizResultsState>({
+        open: false, documentId: "", documentName: "", attempts: [], learningStatuses: [], isLoading: false,
+    })
+    const [selectedLearningDoc, setSelectedLearningDoc] = useState<Document | null>(null)
+    const [learningProgress, setLearningProgress] = useState<LearningProgressState>({
+        completedDocIds: [],
+        startedAtByDocId: {},
+    })
+    const [learningPlanProgress, setLearningPlanProgress] = useState<LearningPlanProgressMap>({})
+    const [learningRemainingSeconds, setLearningRemainingSeconds] = useState(LEARNING_REQUIRED_SECONDS)
+    const [videoProgressByDocId, setVideoProgressByDocId] = useState<Record<string, { current: number; duration: number }>>({})
+
     const contextMenuRef = useRef<HTMLDivElement>(null)
+    const quizTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+    const learningTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
     const activeFolder = folders.find((f) => f.id === activeFolderId) ?? null
     const currentPerson = people.find((person) => person.id === user?.personId) ?? null
@@ -162,6 +323,96 @@ export default function DocumentsPage() {
             visibility: getDefaultVisibility(user),
         }))
     }, [user])
+
+    useEffect(() => {
+        if (isLeaderOrAdmin || !user?.personId) {
+            setLearningProgress({ completedDocIds: [], startedAtByDocId: {} })
+            setLearningPlanProgress({})
+            return
+        }
+
+        let isCancelled = false
+        const loadServerLearningProgress = async () => {
+            try {
+                const res = await fetch("/api/learning/progress", { credentials: "include", cache: "no-store" })
+                if (!res.ok) throw new Error()
+                const payload = (await res.json()) as { ok: boolean; progresses: LearningProgressRecord[] }
+                const records = payload.progresses ?? []
+                const completedDocIds = records
+                    .filter((record) => Boolean(record.completedAt))
+                    .map((record) => record.documentId)
+                const startedAtByDocId = Object.fromEntries(
+                    records
+                        .filter((record) => Boolean(record.startedAt))
+                        .map((record) => [record.documentId, record.startedAt!])
+                )
+                const nextPlanProgress: LearningPlanProgressMap = Object.fromEntries(
+                    records
+                        .filter((record) =>
+                            (record.completedStepIds?.length ?? 0) > 0 ||
+                            (record.activeStepIndex ?? 0) > 0 ||
+                            Object.keys(record.startedAtByStepId ?? {}).length > 0
+                        )
+                        .map((record) => [
+                            record.documentId,
+                            {
+                                activeStepIndex: Math.max(0, record.activeStepIndex ?? 0),
+                                completedStepIds: record.completedStepIds ?? [],
+                                startedAtByStepId: record.startedAtByStepId ?? {},
+                            } satisfies LearningPlanProgress,
+                        ])
+                )
+                if (isCancelled) return
+                setLearningProgress({ completedDocIds, startedAtByDocId })
+                setLearningPlanProgress(nextPlanProgress)
+            } catch {
+                if (isCancelled) return
+                setLearningProgress({ completedDocIds: [], startedAtByDocId: {} })
+                setLearningPlanProgress({})
+            }
+        }
+
+        void loadServerLearningProgress()
+        return () => {
+            isCancelled = true
+        }
+    }, [isLeaderOrAdmin, user?.personId])
+
+    const buildLearningProgressPayload = (
+        documentId: string,
+        progressState: LearningProgressState,
+        planState: LearningPlanProgressMap
+    ) => {
+        const planProgress = planState[documentId] ?? buildDefaultPlanProgress()
+        const firstStepStartedAt = Object.values(planProgress.startedAtByStepId ?? {})[0]
+        return {
+            documentId,
+            startedAt: progressState.startedAtByDocId[documentId] ?? firstStepStartedAt ?? null,
+            completedAt: progressState.completedDocIds.includes(documentId) ? new Date().toISOString() : null,
+            activeStepIndex: Math.max(0, planProgress.activeStepIndex),
+            completedStepIds: planProgress.completedStepIds ?? [],
+            startedAtByStepId: planProgress.startedAtByStepId ?? {},
+        }
+    }
+
+    const syncLearningProgressToServer = async (
+        documentId: string,
+        progressState: LearningProgressState,
+        planState: LearningPlanProgressMap
+    ) => {
+        if (isLeaderOrAdmin || !user?.personId) return
+        try {
+            const payload = buildLearningProgressPayload(documentId, progressState, planState)
+            await fetch("/api/learning/progress", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify(payload),
+            })
+        } catch {
+            // keep local UI responsive if sync fails temporarily
+        }
+    }
 
     const loadFolders = async () => {
         try {
@@ -259,24 +510,15 @@ export default function DocumentsPage() {
     }
 
     const handleCreateDocument = async () => {
-        const { file, name, link, thumbnail, visibility } = createDocumentDialog
+        const { file, visibility } = createDocumentDialog
         const selectedOfficePersonIds = createDocumentDialog.selectedOfficePersonIds ?? []
-
-        const normalizedLink = link.trim()
-        const normalizedThumbnail = thumbnail.trim()
-        const normalizedName = name.trim()
-        const safeLink =
-            normalizedLink.startsWith("http://") || normalizedLink.startsWith("https://")
-                ? normalizedLink
-                : undefined
-        const safeThumbnail =
-            normalizedThumbnail.startsWith("http://") ||
-            normalizedThumbnail.startsWith("https://") ||
-            normalizedThumbnail.startsWith("data:image/")
-                ? normalizedThumbnail
-                : undefined
-        const canSubmit = Boolean(file || normalizedName || safeLink || safeThumbnail)
-        if (!canSubmit) return
+        const normalizedName = (createDocumentDialog.name ?? "").trim()
+        if (!file) return
+        const ext = file.name.split(".").pop()?.toLowerCase()
+        if (ext !== "pdf" && ext !== "pptx") {
+            toast({ title: "Chỉ hỗ trợ upload file PDF hoặc PPTX", variant: "destructive" })
+            return
+        }
 
         setIsSubmitting(true)
         try {
@@ -285,33 +527,39 @@ export default function DocumentsPage() {
                     ? "specific"
                     : visibility
 
-            const requestPayload = file
-                ? {
-                    name: normalizedName || file.name,
-                    type: inferDocumentType(file.name),
-                    size: file.size,
-                    folderId: activeFolderId ?? undefined,
-                    tags: ["uploaded"],
-                    visibility: requestVisibility,
-                    visibleToPersonIds: requestVisibility === "specific" ? selectedOfficePersonIds : [],
-                    description: `Uploaded on ${new Date().toLocaleDateString("vi-VN")}`,
-                    url: safeLink,
-                    thumbnail: safeThumbnail,
-                }
-                : {
-                    name:
-                        normalizedName ||
-                        (safeLink ? safeLink : safeThumbnail ? "Image" : "Untitled"),
-                    type: safeLink ? ("link" as const) : safeThumbnail ? ("image" as const) : ("txt" as const),
-                    size: 0,
-                    folderId: activeFolderId ?? undefined,
-                    tags: [safeLink ? "link" : safeThumbnail ? "image" : "note"],
-                    visibility: requestVisibility,
-                    visibleToPersonIds: requestVisibility === "specific" ? selectedOfficePersonIds : [],
-                    description: `Created on ${new Date().toLocaleDateString("vi-VN")}`,
-                    url: safeLink,
-                    thumbnail: safeThumbnail,
-                }
+            // Upload file to GridFS first if a local file was selected
+            let uploadedFileUrl: string | undefined
+            let generatedLearningPlan: Document["learningPlan"] | undefined
+            const formData = new FormData()
+            formData.append("file", file)
+            const uploadRes = await fetch("/api/documents/upload", {
+                method: "POST",
+                credentials: "include",
+                body: formData,
+            })
+            if (!uploadRes.ok) throw new Error("Không thể upload file")
+            const uploadData = (await uploadRes.json()) as {
+                ok: boolean
+                url: string
+                learningPlan?: Document["learningPlan"]
+            }
+            if (!uploadData.ok) throw new Error("Không thể upload file")
+            uploadedFileUrl = uploadData.url
+            generatedLearningPlan = uploadData.learningPlan
+
+            const requestPayload = {
+                name: normalizedName || file.name,
+                type: inferDocumentType(file.name),
+                size: file.size,
+                folderId: activeFolderId ?? undefined,
+                tags: ["uploaded"],
+                visibility: requestVisibility,
+                visibleToPersonIds: requestVisibility === "specific" ? selectedOfficePersonIds : [],
+                description: `Uploaded on ${new Date().toLocaleDateString("vi-VN")}`,
+                url: uploadedFileUrl,
+                learningPlan: generatedLearningPlan,
+                isLearningMaterial: Boolean(generatedLearningPlan),
+            }
 
             const res = await fetch("/api/documents", {
                 method: "POST",
@@ -326,8 +574,8 @@ export default function DocumentsPage() {
             setDocumentsData((prev) => [responsePayload.document, ...prev])
             closeCreateDocumentDialog()
             toast({ title: "Tạo file thành công" })
-        } catch {
-            toast({ title: "Không thể tạo tài liệu", variant: "destructive" })
+        } catch (err) {
+            toast({ title: err instanceof Error ? err.message : "Không thể tạo tài liệu", variant: "destructive" })
         } finally {
             setIsSubmitting(false)
         }
@@ -464,6 +712,535 @@ export default function DocumentsPage() {
     }
 
     const groups = groupedDocuments()
+    const learningDocs = isLeaderOrAdmin
+        ? documentsData.filter((d) => d.isLearningMaterial)
+        : documentsData
+    const completedLearningCount = learningDocs.filter((doc) => learningProgress.completedDocIds.includes(doc.id)).length
+
+    useEffect(() => {
+        if (isLeaderOrAdmin) return
+        const validIds = new Set(learningDocs.map((doc) => doc.id))
+        setLearningProgress((prev) => {
+            const completedDocIds = prev.completedDocIds.filter((id) => validIds.has(id))
+            const startedAtByDocId = Object.fromEntries(
+                Object.entries(prev.startedAtByDocId).filter(([id]) => validIds.has(id))
+            )
+            const unchanged =
+                completedDocIds.length === prev.completedDocIds.length &&
+                Object.keys(startedAtByDocId).length === Object.keys(prev.startedAtByDocId).length
+            return unchanged ? prev : { completedDocIds, startedAtByDocId }
+        })
+    }, [isLeaderOrAdmin, learningDocs])
+
+    useEffect(() => {
+        if (activeTab !== "learning" || learningDocs.length === 0) return
+        setSelectedLearningDoc((prev) => {
+            if (prev && learningDocs.some((doc) => doc.id === prev.id)) return prev
+            return learningDocs[0] ?? null
+        })
+    }, [activeTab, learningDocs])
+
+    useEffect(() => {
+        setLearningPlanProgress((prev) => {
+            const validIds = new Set(documentsData.map((doc) => doc.id))
+            const next: LearningPlanProgressMap = {}
+            for (const [docId, progress] of Object.entries(prev)) {
+                if (!validIds.has(docId)) continue
+                const doc = documentsData.find((item) => item.id === docId)
+                const steps = doc?.learningPlan?.steps ?? []
+                if (steps.length === 0) continue
+                const validStepIds = new Set(steps.map((step) => step.id))
+                const completedStepIds = progress.completedStepIds.filter((id) => validStepIds.has(id))
+                const startedAtByStepId = Object.fromEntries(
+                    Object.entries(progress.startedAtByStepId).filter(([id]) => validStepIds.has(id))
+                )
+                next[docId] = {
+                    activeStepIndex: Math.min(progress.activeStepIndex, Math.max(steps.length - 1, 0)),
+                    completedStepIds,
+                    startedAtByStepId,
+                }
+            }
+            return next
+        })
+    }, [documentsData])
+
+    useEffect(() => {
+        if (isLeaderOrAdmin || activeTab !== "learning" || !selectedLearningDoc) {
+            if (learningTimerRef.current) clearInterval(learningTimerRef.current)
+            setLearningRemainingSeconds(LEARNING_REQUIRED_SECONDS)
+            return
+        }
+        const currentDocId = selectedLearningDoc.id
+        const planSteps = selectedLearningDoc.learningPlan?.steps ?? []
+        const docPlanProgress = learningPlanProgress[currentDocId] ?? buildDefaultPlanProgress()
+        const activePlanStep = planSteps[docPlanProgress.activeStepIndex] ?? planSteps[0]
+        const planVideoProgress = activePlanStep
+            ? videoProgressByDocId[getLearningVideoProgressKey(currentDocId, activePlanStep.id)]
+            : undefined
+        const videoProgress = videoProgressByDocId[getLearningVideoProgressKey(currentDocId)]
+        const isVideoLesson = selectedLearningDoc.type === "mp4" && Boolean(selectedLearningDoc.url)
+
+        if (learningProgress.completedDocIds.includes(currentDocId)) {
+            if (learningTimerRef.current) clearInterval(learningTimerRef.current)
+            setLearningRemainingSeconds(0)
+            return
+        }
+
+        if (planSteps.length > 0 && activePlanStep) {
+            if (learningTimerRef.current) clearInterval(learningTimerRef.current)
+
+            const hasVideoStep = Boolean(activePlanStep.media?.some((item) => item.type === "video"))
+            if (hasVideoStep) {
+                const remaining = planVideoProgress?.duration && planVideoProgress.duration > 0
+                    ? Math.max(0, Math.ceil(planVideoProgress.duration - planVideoProgress.current))
+                    : LEARNING_REQUIRED_SECONDS
+                setLearningRemainingSeconds(remaining)
+                return
+            }
+
+            let startedAt = docPlanProgress.startedAtByStepId[activePlanStep.id]
+            if (!startedAt) {
+                startedAt = new Date().toISOString()
+                setLearningPlanProgress((prev) => {
+                    const nextPlanProgress = {
+                        ...prev,
+                        [currentDocId]: {
+                            ...docPlanProgress,
+                            startedAtByStepId: {
+                                ...docPlanProgress.startedAtByStepId,
+                                [activePlanStep.id]: startedAt!,
+                            },
+                        },
+                    }
+                    void syncLearningProgressToServer(currentDocId, learningProgress, nextPlanProgress)
+                    return nextPlanProgress
+                })
+            }
+
+            const tick = () => {
+                const elapsed = Math.floor((Date.now() - new Date(startedAt!).getTime()) / 1000)
+                const required = Math.max(activePlanStep.estimatedSeconds, 1)
+                const remain = Math.max(0, required - elapsed)
+                setLearningRemainingSeconds(remain)
+                if (remain <= 0) {
+                    if (learningTimerRef.current) clearInterval(learningTimerRef.current)
+                    setLearningPlanProgress((prev) => {
+                        const current = prev[currentDocId] ?? buildDefaultPlanProgress()
+                        if (current.completedStepIds.includes(activePlanStep.id)) return prev
+                        const completedStepIds = [...current.completedStepIds, activePlanStep.id]
+                        const nextState: LearningPlanProgress = {
+                            ...current,
+                            completedStepIds,
+                            activeStepIndex: Math.min(current.activeStepIndex, Math.max(planSteps.length - 1, 0)),
+                        }
+                        if (completedStepIds.length >= planSteps.length) {
+                            markDocumentAsCompleted(currentDocId)
+                        }
+                        const nextPlanProgress = { ...prev, [currentDocId]: nextState }
+                        void syncLearningProgressToServer(currentDocId, learningProgress, nextPlanProgress)
+                        return nextPlanProgress
+                    })
+                }
+            }
+
+            tick()
+            learningTimerRef.current = setInterval(tick, 1000)
+            return () => {
+                if (learningTimerRef.current) clearInterval(learningTimerRef.current)
+            }
+        }
+
+        if (isVideoLesson) {
+            if (learningTimerRef.current) clearInterval(learningTimerRef.current)
+            const remaining = videoProgress?.duration && videoProgress.duration > 0
+                ? Math.max(0, Math.ceil(videoProgress.duration - videoProgress.current))
+                : LEARNING_REQUIRED_SECONDS
+            setLearningRemainingSeconds(remaining)
+            return
+        }
+
+        let startedAt = learningProgress.startedAtByDocId[currentDocId]
+        if (!startedAt) {
+            startedAt = new Date().toISOString()
+            setLearningProgress((prev) => {
+                const nextProgress = {
+                    ...prev,
+                    startedAtByDocId: {
+                        ...prev.startedAtByDocId,
+                        [currentDocId]: startedAt!,
+                    },
+                }
+                void syncLearningProgressToServer(currentDocId, nextProgress, learningPlanProgress)
+                return nextProgress
+            })
+        }
+
+        const tick = () => {
+            const elapsed = Math.floor((Date.now() - new Date(startedAt!).getTime()) / 1000)
+            const remain = Math.max(0, LEARNING_REQUIRED_SECONDS - elapsed)
+            setLearningRemainingSeconds(remain)
+            if (remain <= 0 && learningTimerRef.current) {
+                clearInterval(learningTimerRef.current)
+            }
+        }
+
+        tick()
+        learningTimerRef.current = setInterval(tick, 1000)
+        return () => {
+            if (learningTimerRef.current) clearInterval(learningTimerRef.current)
+        }
+    }, [activeTab, isLeaderOrAdmin, learningPlanProgress, learningProgress.completedDocIds, learningProgress.startedAtByDocId, selectedLearningDoc, videoProgressByDocId])
+
+    // ── Learning handlers ────────────────────────────────────────────
+
+    const loadLearningData = async (docs: Document[]) => {
+        if (docs.length === 0) return
+        const results = await Promise.allSettled(
+            docs.map((doc) =>
+                Promise.all([
+                    fetch(`/api/learning/quiz/${doc.id}`, { credentials: "include", cache: "no-store" })
+                        .then((r) => r.json() as Promise<{ quiz: LearningQuizRecord | null }>),
+                    fetch(`/api/learning/quiz/${doc.id}/attempts`, { credentials: "include", cache: "no-store" })
+                        .then((r) => r.json() as Promise<{ attempt: QuizAttemptRecord | null }>),
+                ])
+            )
+        )
+        const newQuizzes: Record<string, LearningQuizRecord | null> = {}
+        const newAttempts: Record<string, QuizAttemptRecord | null> = {}
+        results.forEach((result, i) => {
+            const doc = docs[i]!
+            if (result.status === "fulfilled") {
+                newQuizzes[doc.id] = result.value[0].quiz ?? null
+                newAttempts[doc.id] = result.value[1].attempt ?? null
+            }
+        })
+        setQuizzes(newQuizzes)
+        setMyAttempts(newAttempts)
+        setLearningDataLoaded(true)
+    }
+
+    const handleEnterLearningTab = () => {
+        setActiveTab("learning")
+        const docs = isLeaderOrAdmin
+            ? documentsData.filter((d) => d.isLearningMaterial)
+            : documentsData
+        if (docs.length > 0 && !selectedLearningDoc) {
+            setSelectedLearningDoc(docs[0] ?? null)
+        }
+        void loadLearningData(docs)
+    }
+
+    const markDocumentAsCompleted = (docId: string) => {
+        setLearningProgress((prev) => {
+            if (prev.completedDocIds.includes(docId)) return prev
+            const nextProgress = {
+                ...prev,
+                completedDocIds: [...prev.completedDocIds, docId],
+            }
+            void syncLearningProgressToServer(docId, nextProgress, learningPlanProgress)
+            return nextProgress
+        })
+    }
+
+    const handleMarkLessonCompleted = (docId: string) => {
+        if (isLeaderOrAdmin) return
+        if (learningRemainingSeconds > 0) {
+            toast({
+                title: `Bạn cần học thêm ${learningRemainingSeconds}s trước khi hoàn thành bài này.`,
+                variant: "destructive",
+            })
+            return
+        }
+        markDocumentAsCompleted(docId)
+        toast({ title: "Đã đánh dấu học xong. Bạn có thể sang bài tiếp theo hoặc làm bài kiểm tra." })
+    }
+
+    const handleLearningVideoProgress = (docId: string, current: number, duration: number, stepId?: string) => {
+        if (!Number.isFinite(duration) || duration <= 0) return
+        const progressKey = getLearningVideoProgressKey(docId, stepId)
+
+        setVideoProgressByDocId((prev) => ({
+            ...prev,
+            [progressKey]: { current, duration },
+        }))
+
+        if (stepId) {
+            const doc = documentsData.find((item) => item.id === docId)
+            const steps = doc?.learningPlan?.steps ?? []
+            const docProgress = learningPlanProgress[docId] ?? buildDefaultPlanProgress()
+            if (docProgress.completedStepIds.includes(stepId)) return
+            const remaining = Math.max(0, Math.ceil(duration - current))
+            if (selectedLearningDoc?.id === docId) {
+                setLearningRemainingSeconds(remaining)
+            }
+            if (remaining === 0) {
+                setLearningPlanProgress((prev) => {
+                    const nextPlanProgress = {
+                        ...prev,
+                        [docId]: {
+                            ...docProgress,
+                            completedStepIds: docProgress.completedStepIds.includes(stepId)
+                                ? docProgress.completedStepIds
+                                : [...docProgress.completedStepIds, stepId],
+                            activeStepIndex: Math.min(docProgress.activeStepIndex, Math.max(steps.length - 1, 0)),
+                        },
+                    }
+                    void syncLearningProgressToServer(docId, learningProgress, nextPlanProgress)
+                    return nextPlanProgress
+                })
+                const completedStepIds = docProgress.completedStepIds.includes(stepId)
+                    ? docProgress.completedStepIds
+                    : [...docProgress.completedStepIds, stepId]
+                if (steps.length > 0 && completedStepIds.length >= steps.length) {
+                    markDocumentAsCompleted(docId)
+                }
+            }
+            return
+        }
+
+        if (learningProgress.completedDocIds.includes(docId)) return
+
+        const remaining = Math.max(0, Math.ceil(duration - current))
+        if (selectedLearningDoc?.id === docId) {
+            setLearningRemainingSeconds(remaining)
+        }
+
+        if (remaining === 0) {
+            markDocumentAsCompleted(docId)
+        }
+    }
+
+    const handleMarkAsLearning = async (docId: string, isLearning: boolean) => {
+        try {
+            const res = await fetch(`/api/documents/${docId}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({ isLearningMaterial: isLearning }),
+            })
+            if (!res.ok) throw new Error()
+            const payload = (await res.json()) as { ok: boolean; document: Document }
+            setDocumentsData((prev) => prev.map((d) => (d.id === docId ? payload.document : d)))
+            toast({ title: isLearning ? "Đã đánh dấu là Có kiểm tra" : "Đã bỏ đánh dấu có kiểm tra" })
+        } catch {
+            toast({ title: "Không thể cập nhật", variant: "destructive" })
+        }
+    }
+
+    const handleStartLearningFromDocument = (doc: Document) => {
+        if (isLeaderOrAdmin) return
+        setActiveTab("learning")
+        setSelectedLearningDoc(doc)
+        const docs = documentsData
+        void loadLearningData(docs)
+    }
+
+    const handleOpenQuizCreate = (doc: Document) => {
+        const existingQuiz = quizzes[doc.id] ?? null
+        setQuizCreateDialog({
+            open: true,
+            documentId: doc.id,
+            documentName: doc.name,
+            existingQuizId: existingQuiz?.id ?? null,
+            title: existingQuiz?.title ?? doc.name,
+            description: existingQuiz?.description ?? "",
+            durationMinutes: String(existingQuiz?.durationMinutes ?? 15),
+            questions: existingQuiz?.questions.map((q) => ({
+                text: q.text,
+                options: (q.options as [string, string, string, string]) ?? ["", "", "", ""],
+                correctIndex: q.correctIndex ?? 0,
+                explanation: q.explanation ?? "",
+            })) ?? [{ text: "", options: ["", "", "", ""], correctIndex: 0, explanation: "" }],
+        })
+    }
+
+    const handleAddQuizQuestion = () => {
+        setQuizCreateDialog((s) => ({
+            ...s,
+            questions: [...s.questions, { text: "", options: ["", "", "", ""], correctIndex: 0, explanation: "" }],
+        }))
+    }
+
+    const handleRemoveQuizQuestion = (idx: number) => {
+        setQuizCreateDialog((s) => ({ ...s, questions: s.questions.filter((_, i) => i !== idx) }))
+    }
+
+    const handleSaveQuiz = async () => {
+        const { documentId: currentDocId, existingQuizId, title, description, durationMinutes, questions, isNewDocument, documentName } = quizCreateDialog
+        if (isNewDocument && !documentName.trim()) { toast({ title: "Cần nhập tên bài kiểm tra", variant: "destructive" }); return }
+        if (!title.trim()) { toast({ title: "Cần nhập tiêu đề quiz", variant: "destructive" }); return }
+        if (questions.some((q) => !q.text.trim() || q.options.some((o) => !o.trim()))) {
+            toast({ title: "Cần nhập đầy đủ câu hỏi và 4 đáp án", variant: "destructive" }); return
+        }
+        setIsSubmitting(true)
+        try {
+            let resolvedDocId = currentDocId
+
+            // When creating a brand-new learning item, create the document first
+            if (isNewDocument && !existingQuizId) {
+                const docRes = await fetch("/api/documents", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    credentials: "include",
+                    body: JSON.stringify({
+                        name: documentName.trim(),
+                        type: "txt",
+                        size: 0,
+                        tags: ["learning"],
+                        visibility: getDefaultVisibility(user),
+                        visibleToPersonIds: [],
+                        description: description.trim() || `Tạo ngày ${new Date().toLocaleDateString("vi-VN")}`,
+                        isLearningMaterial: true,
+                    }),
+                })
+                const docPayload = (await docRes.json()) as { ok: boolean; document: Document }
+                if (!docRes.ok) throw new Error("Không thể tạo bài học")
+                const newDoc = docPayload.document
+                resolvedDocId = newDoc.id
+                setDocumentsData((prev) => [newDoc, ...prev])
+                setQuizzes((prev) => ({ ...prev, [newDoc.id]: null }))
+                setMyAttempts((prev) => ({ ...prev, [newDoc.id]: null }))
+                setSelectedLearningDoc(newDoc)
+            }
+
+            const payload = {
+                title: title.trim(),
+                description: description.trim(),
+                durationMinutes: Number(durationMinutes) || 15,
+                questions,
+                ...(existingQuizId ? { quizId: existingQuizId } : {}),
+            }
+            const res = await fetch(`/api/learning/quiz/${resolvedDocId}`, {
+                method: existingQuizId ? "PATCH" : "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify(payload),
+            })
+            const data = (await res.json()) as { ok: boolean; quiz?: LearningQuizRecord; message?: string }
+            if (!res.ok || !data.ok) throw new Error(data.message ?? "Lỗi")
+            setQuizzes((prev) => ({ ...prev, [resolvedDocId]: data.quiz! }))
+            setQuizCreateDialog(defaultQuizCreate())
+            toast({ title: existingQuizId ? "Đã cập nhật quiz" : "Đã tạo quiz" })
+        } catch (err) {
+            toast({ title: err instanceof Error ? err.message : "Không thể lưu quiz", variant: "destructive" })
+        } finally {
+            setIsSubmitting(false)
+        }
+    }
+
+    const handleDeleteQuiz = async (documentId: string) => {
+        const quiz = quizzes[documentId]
+        if (!quiz) return
+        if (!confirm("Xoá quiz này? Tất cả kết quả của nhân viên cũng sẽ bị xoá.")) return
+        try {
+            await fetch(`/api/learning/quiz/${documentId}`, {
+                method: "DELETE",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({ quizId: quiz.id }),
+            })
+            setQuizzes((prev) => ({ ...prev, [documentId]: null }))
+            toast({ title: "Đã xoá quiz" })
+        } catch {
+            toast({ title: "Không thể xoá quiz", variant: "destructive" })
+        }
+    }
+
+    const handleOpenQuizTake = (doc: Document) => {
+        const quiz = quizzes[doc.id]
+        if (!quiz) return
+        if (!isLeaderOrAdmin && completedLearningCount < learningDocs.length) {
+            toast({
+                title: "Bạn cần hoàn thành toàn bộ khóa học trước khi làm bài test.",
+                variant: "destructive",
+            })
+            return
+        }
+        const startedAt = new Date().toISOString()
+        setQuizTakeModal({
+            open: true,
+            quiz,
+            documentId: doc.id,
+            answers: Array(quiz.questions.length).fill(-1) as number[],
+            currentQuestion: 0,
+            startedAt,
+            timeLeftSeconds: quiz.durationMinutes * 60,
+            isSubmitting: false,
+            isSubmitted: false,
+            result: null,
+        })
+    }
+
+    useEffect(() => {
+        if (!quizTakeModal.open || quizTakeModal.isSubmitted) {
+            if (quizTimerRef.current) clearInterval(quizTimerRef.current)
+            return
+        }
+        quizTimerRef.current = setInterval(() => {
+            setQuizTakeModal((prev) => {
+                if (prev.timeLeftSeconds <= 1) {
+                    clearInterval(quizTimerRef.current!)
+                    void handleSubmitQuiz(true)
+                    return { ...prev, timeLeftSeconds: 0 }
+                }
+                return { ...prev, timeLeftSeconds: prev.timeLeftSeconds - 1 }
+            })
+        }, 1000)
+        return () => { if (quizTimerRef.current) clearInterval(quizTimerRef.current) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [quizTakeModal.open, quizTakeModal.isSubmitted])
+
+    const handleSubmitQuiz = async (autoSubmit = false) => {
+        if (!autoSubmit && !confirm("Nộp bài? Bạn sẽ không thể làm lại.")) return
+        if (quizTimerRef.current) clearInterval(quizTimerRef.current)
+        setQuizTakeModal((prev) => ({ ...prev, isSubmitting: true }))
+        try {
+            const { documentId, answers, startedAt } = quizTakeModal
+            const res = await fetch(`/api/learning/quiz/${documentId}/submit`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({ answers, startedAt }),
+            })
+            const data = (await res.json()) as { ok: boolean; result?: QuizAttemptRecord; message?: string }
+            if (!res.ok || !data.ok) throw new Error(data.message ?? "Lỗi nộp bài")
+            setMyAttempts((prev) => ({ ...prev, [documentId]: data.result! }))
+            setQuizTakeModal((prev) => ({ ...prev, isSubmitting: false, isSubmitted: true, result: data.result! }))
+        } catch (err) {
+            toast({ title: err instanceof Error ? err.message : "Không thể nộp bài", variant: "destructive" })
+            setQuizTakeModal((prev) => ({ ...prev, isSubmitting: false }))
+        }
+    }
+
+    const handleOpenQuizResults = async (doc: Document) => {
+        setQuizResultsModal({
+            open: true,
+            documentId: doc.id,
+            documentName: doc.name,
+            attempts: [],
+            learningStatuses: [],
+            isLoading: true,
+        })
+        try {
+            const [attemptsRes, statusesRes] = await Promise.all([
+                fetch(`/api/learning/quiz/${doc.id}/attempts?scope=team`, {
+                    credentials: "include",
+                    cache: "no-store",
+                }),
+                fetch(`/api/learning/progress/${doc.id}/team`, {
+                    credentials: "include",
+                    cache: "no-store",
+                }),
+            ])
+            const attemptsData = (await attemptsRes.json()) as { attempts: QuizAttemptRecord[] }
+            const statusData = (await statusesRes.json()) as { rows: LearningStatusRow[] }
+            const attempts = attemptsData.attempts ?? []
+            const learningStatuses = statusData.rows ?? []
+            setQuizResultsModal((prev) => ({ ...prev, attempts, learningStatuses, isLoading: false }))
+        } catch {
+            setQuizResultsModal((prev) => ({ ...prev, isLoading: false }))
+        }
+    }
 
     // ── Sub-components ───────────────────────────────────────────────
 
@@ -546,6 +1323,21 @@ export default function DocumentsPage() {
                             </Avatar>
                             <span className="text-xs text-gray-500 dark:text-gray-400 truncate">{owner?.name || "Unknown"}</span>
                         </div>
+                        {!isLeaderOrAdmin && (
+                            <div className="pt-1">
+                                <Button
+                                    size="sm"
+                                    className="h-8 w-full bg-blue-600 hover:bg-blue-700 text-white"
+                                    onClick={(e) => {
+                                        e.stopPropagation()
+                                        handleStartLearningFromDocument(doc)
+                                    }}
+                                >
+                                    <BookOpen className="w-3.5 h-3.5 mr-1.5" />
+                                    Học
+                                </Button>
+                            </div>
+                        )}
                     </div>
                 </CardContent>
             </Card>
@@ -583,6 +1375,19 @@ export default function DocumentsPage() {
                     </div>
                 </div>
                 <div className="flex items-center space-x-3 flex-shrink-0">
+                    {!isLeaderOrAdmin && (
+                        <Button
+                            size="sm"
+                            className="h-8 bg-blue-600 hover:bg-blue-700 text-white"
+                            onClick={(e) => {
+                                e.stopPropagation()
+                                handleStartLearningFromDocument(doc)
+                            }}
+                        >
+                            <BookOpen className="w-3.5 h-3.5 mr-1.5" />
+                            Học
+                        </Button>
+                    )}
                     <Avatar className="w-6 h-6">
                         <AvatarImage src={owner?.imageURL || "/placeholder.svg"} />
                         <AvatarFallback className="bg-gray-200 dark:bg-gray-600 text-xs">
@@ -599,15 +1404,721 @@ export default function DocumentsPage() {
         )
     }
 
+    const LearningCard = ({ doc }: { doc: Document }) => {
+        const owner = people.find((p) => p.id === doc.ownerId)
+        const docType = documentTypes[doc.type] ?? documentTypes.txt
+        const quiz = quizzes[doc.id]
+        const attempt = myAttempts[doc.id]
+        const quizLoaded = doc.id in quizzes
+
+        return (
+            <Card className="bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 hover:shadow-md transition-all flex flex-col">
+                <CardContent className="p-5 flex flex-col flex-1">
+                    {/* Doc icon + badges */}
+                    <div className="flex items-start gap-3 mb-4">
+                        <div className={`w-12 h-12 rounded-xl ${docType.bgColor} flex items-center justify-center text-2xl flex-shrink-0 overflow-hidden`}>
+                            {doc.thumbnail
+                                ? <img src={doc.thumbnail} alt={doc.name} className="w-full h-full object-cover rounded-xl" />
+                                : doc.type === "link" ? <Link className="w-6 h-6 text-cyan-500" />
+                                : <span>{docType.icon}</span>}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <h3 className="font-semibold text-gray-900 dark:text-white truncate" title={doc.name}>{doc.name}</h3>
+                            <div className="flex items-center gap-2 mt-1">
+                                <Avatar className="w-4 h-4">
+                                    <AvatarImage src={owner?.imageURL || "/placeholder.svg"} />
+                                    <AvatarFallback className="bg-gray-200 dark:bg-gray-600 text-xs">{owner?.name?.[0] ?? "U"}</AvatarFallback>
+                                </Avatar>
+                                <span className="text-xs text-gray-500 dark:text-gray-400">{owner?.name ?? "Unknown"}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Quiz status */}
+                    <div className="mb-4">
+                        {!quizLoaded ? (
+                            <span className="text-xs text-gray-400 dark:text-gray-500">Đang tải...</span>
+                        ) : quiz ? (
+                            <div className="flex items-center gap-2">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300">
+                                    <ClipboardCheck className="w-3 h-3" />
+                                    Quiz · {quiz.questions.length} câu · {quiz.durationMinutes} phút
+                                </span>
+                            </div>
+                        ) : (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400">
+                                Chưa có quiz
+                            </span>
+                        )}
+                    </div>
+
+                    {/* Attempt status (employee) / stats (leader) */}
+                    <div className="mb-4 flex-1">
+                        {!isLeaderOrAdmin && quiz && (
+                            attempt ? (
+                                <div className={`flex items-center gap-2 px-3 py-2 rounded-lg ${attempt.score >= 80 ? "bg-green-50 dark:bg-green-900/20" : attempt.score >= 50 ? "bg-yellow-50 dark:bg-yellow-900/20" : "bg-red-50 dark:bg-red-900/20"}`}>
+                                    <Trophy className={`w-4 h-4 ${attempt.score >= 80 ? "text-green-600" : attempt.score >= 50 ? "text-yellow-600" : "text-red-500"}`} />
+                                    <div>
+                                        <p className="text-sm font-semibold text-gray-900 dark:text-white">{attempt.score}/100 điểm</p>
+                                        <p className="text-xs text-gray-500 dark:text-gray-400">{attempt.correctAnswers}/{attempt.totalQuestions} câu đúng</p>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-blue-50 dark:bg-blue-900/20">
+                                    <BookOpen className="w-4 h-4 text-blue-500" />
+                                    <span className="text-sm text-blue-700 dark:text-blue-300">Chưa làm bài</span>
+                                </div>
+                            )
+                        )}
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex flex-wrap gap-2 mt-auto pt-3 border-t border-gray-100 dark:border-gray-700">
+                        {/* View document */}
+                        {doc.url && (
+                            <Button size="sm" variant="outline" className="bg-transparent text-xs h-8"
+                                onClick={() => window.open(doc.url, "_blank")}>
+                                <Eye className="w-3 h-3 mr-1" />Xem tài liệu
+                            </Button>
+                        )}
+
+                        {/* Employee: take quiz */}
+                        {!isLeaderOrAdmin && quiz && !attempt && (
+                            <Button size="sm" className="bg-blue-600 hover:bg-blue-700 text-xs h-8"
+                                onClick={() => handleOpenQuizTake(doc)}>
+                                <ClipboardCheck className="w-3 h-3 mr-1" />Làm bài
+                            </Button>
+                        )}
+
+                        {/* Employee: review result */}
+                        {!isLeaderOrAdmin && quiz && attempt && (
+                            <Button size="sm" variant="outline" className="bg-transparent text-xs h-8"
+                                onClick={() => setQuizTakeModal((prev) => ({ ...prev, open: true, quiz, documentId: doc.id, isSubmitted: true, result: attempt }))}>
+                                <BarChart2 className="w-3 h-3 mr-1" />Xem kết quả
+                            </Button>
+                        )}
+
+                        {/* Leader: create/edit quiz */}
+                        {isLeaderOrAdmin && (
+                            <>
+                                <Button size="sm" variant="outline" className="bg-transparent text-xs h-8"
+                                    onClick={() => handleOpenQuizCreate(doc)}>
+                                    <Pencil className="w-3 h-3 mr-1" />{quiz ? "Sửa quiz" : "Tạo quiz"}
+                                </Button>
+                                {quiz && (
+                                    <Button size="sm" variant="outline" className="bg-transparent text-xs h-8"
+                                        onClick={() => void handleOpenQuizResults(doc)}>
+                                        <Users className="w-3 h-3 mr-1" />Kết quả
+                                    </Button>
+                                )}
+                            </>
+                        )}
+                    </div>
+                </CardContent>
+            </Card>
+        )
+    }
+
     // ── Render ───────────────────────────────────────────────────────
 
     return (
         <div className="p-6">
             {/* Header */}
-            <div className="mb-6">
-                <h1 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">Documents</h1>
-                <p className="text-gray-600 dark:text-gray-400">Quản lý và tổ chức tài liệu của phòng ban</p>
+            <div className="mb-4">
+                <h1 className="text-2xl font-bold text-gray-900 dark:text-white mb-1">Documents</h1>
+                <p className="text-gray-600 dark:text-gray-400 text-sm">Quản lý và tổ chức tài liệu của phòng ban</p>
             </div>
+
+            {/* ── Tab bar ── */}
+            <div className="flex gap-1 mb-6 bg-gray-100 dark:bg-gray-800 rounded-xl p-1 w-fit">
+                <button
+                    onClick={() => setActiveTab("all")}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                        activeTab === "all"
+                            ? "bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm"
+                            : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+                    }`}
+                >
+                    <FileText className="w-4 h-4" />
+                    Tài liệu
+                </button>
+                <button
+                    onClick={handleEnterLearningTab}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                        activeTab === "learning"
+                            ? "bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm"
+                            : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+                    }`}
+                >
+                    <GraduationCap className="w-4 h-4" />
+                    {isLeaderOrAdmin ? "Bài Kiểm Tra" : "Học liệu"}
+                    {learningDocs.length > 0 && (
+                        <span className="ml-1 px-1.5 py-0.5 rounded-full text-xs bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-300">
+                            {learningDocs.length}
+                        </span>
+                    )}
+                </button>
+            </div>
+
+            {/* ── Học liệu tab ── */}
+            {activeTab === "learning" && (
+                learningDocs.length === 0 ? (
+                    <div className="text-center py-20">
+                        <GraduationCap className="w-12 h-12 mx-auto mb-4 text-gray-300 dark:text-gray-600" />
+                        <h3 className="text-base font-medium text-gray-700 dark:text-gray-300 mb-2">Chưa có học liệu</h3>
+                        {isLeaderOrAdmin ? (
+                            <p className="text-sm text-gray-500 dark:text-gray-400">
+                                Vào tab <strong>Tài liệu</strong>, chuột phải vào tài liệu và chọn <strong>"Đánh dấu là có kiểm tra"</strong>.
+                            </p>
+                        ) : (
+                            <p className="text-sm text-gray-500 dark:text-gray-400">Chưa có tài liệu học nào.</p>
+                        )}
+                    </div>
+                ) : (
+                    <div
+                        className="flex rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden bg-white dark:bg-gray-900"
+                        style={{ minHeight: "calc(100vh - 220px)" }}
+                    >
+                        {/* ── Left Sidebar ─────────────────────────────────── */}
+                        <div className="w-72 xl:w-80 border-r border-gray-200 dark:border-gray-800 flex flex-col flex-shrink-0">
+                            {/* Sidebar header */}
+                            <div className="px-5 py-4 border-b border-gray-200 dark:border-gray-800">
+                                <div className="flex items-center justify-between mb-1">
+                                    <h2 className="font-semibold text-gray-900 dark:text-white">
+                                        {isLeaderOrAdmin ? "Bài Kiểm Tra" : "Học liệu"}
+                                    </h2>
+                                    {isLeaderOrAdmin && (
+                                        <Button size="sm" variant="ghost" className="h-7 text-xs px-2"
+                                            onClick={() => setQuizCreateDialog({
+                                                open: true, documentId: "", documentName: "", existingQuizId: null,
+                                                title: "", description: "", durationMinutes: "15",
+                                                questions: [{ text: "", options: ["", "", "", ""], correctIndex: 0, explanation: "" }],
+                                                isNewDocument: true,
+                                            })}>
+                                            <Plus className="w-3 h-3 mr-1" />Thêm
+                                        </Button>
+                                    )}
+                                </div>
+                                <p className="text-xs text-gray-500 dark:text-gray-400">{learningDocs.length} bài học</p>
+                                {/* Employee progress bar */}
+                                {!isLeaderOrAdmin && (
+                                    <div className="mt-3">
+                                        <div className="flex justify-between text-xs text-gray-400 dark:text-gray-500 mb-1">
+                                            <span>Tiến độ</span>
+                                            <span>{completedLearningCount}/{learningDocs.length}</span>
+                                        </div>
+                                        <div className="h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                                            <div
+                                                className="h-full bg-green-500 rounded-full transition-all"
+                                                style={{ width: `${learningDocs.length === 0 ? 0 : Math.round((completedLearningCount / learningDocs.length) * 100)}%` }}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Doc list */}
+                            <div className="overflow-y-auto flex-1">
+                                {learningDocs.map((doc) => {
+                                    const quiz = quizzes[doc.id]
+                                    const attempt = myAttempts[doc.id]
+                                    const isSelected = selectedLearningDoc?.id === doc.id
+                                    const isCompleted = !isLeaderOrAdmin && learningProgress.completedDocIds.includes(doc.id)
+
+                                    return (
+                                        <button
+                                            key={doc.id}
+                                            onClick={() => setSelectedLearningDoc(doc)}
+                                            className={`w-full flex items-start gap-3 py-3.5 text-left transition-colors border-b border-gray-100 dark:border-gray-800/60 ${
+                                                isSelected
+                                                    ? "bg-violet-50 dark:bg-violet-900/20 border-l-[3px] border-l-violet-500 pl-[13px] pr-4"
+                                                    : "px-4 hover:bg-gray-50 dark:hover:bg-gray-800/60"
+                                            }`}
+                                        >
+                                            <div className="mt-0.5 flex-shrink-0">
+                                                {isCompleted
+                                                    ? <CheckCircle2 className="w-5 h-5 text-green-500" />
+                                                    : <div className={`w-5 h-5 rounded-full border-2 ${isSelected ? "border-violet-400" : "border-gray-300 dark:border-gray-600"}`} />}
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <p className={`text-sm leading-snug ${isSelected ? "font-semibold text-violet-700 dark:text-violet-300" : "font-medium text-gray-800 dark:text-gray-200"}`}>
+                                                    {doc.name}
+                                                </p>
+                                                <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                                                    {quiz ? (
+                                                        <span className="text-xs text-violet-500 dark:text-violet-400">
+                                                            {quiz.questions.length} câu · {quiz.durationMinutes} phút
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-xs text-gray-400 dark:text-gray-500">Chưa có quiz</span>
+                                                    )}
+                                                </div>
+                                                {!isLeaderOrAdmin && attempt && (
+                                                    <span className={`text-xs font-semibold mt-0.5 block ${attempt.score >= 80 ? "text-green-600" : attempt.score >= 50 ? "text-amber-500" : "text-red-500"}`}>
+                                                        Điểm: {attempt.score}/100
+                                                    </span>
+                                                )}
+                                            </div>
+                                            {isSelected && <ChevronRight className="w-4 h-4 text-violet-400 flex-shrink-0 mt-0.5" />}
+                                        </button>
+                                    )
+                                })}
+                            </div>
+                        </div>
+
+                        {/* ── Main Content ──────────────────────────────────── */}
+                        <div className="flex-1 overflow-y-auto bg-gray-50 dark:bg-gray-950">
+                            {!selectedLearningDoc ? (
+                                <div className="flex h-full items-center justify-center">
+                                    <p className="text-sm text-gray-400">Chọn một bài học từ danh sách bên trái</p>
+                                </div>
+                            ) : (() => {
+                                const doc = selectedLearningDoc
+                                const quiz = quizzes[doc.id]
+                                const attempt = myAttempts[doc.id]
+                                const docType = documentTypes[doc.type] ?? documentTypes.txt
+                                const currentIdx = learningDocs.findIndex((d) => d.id === doc.id)
+                                const prevDoc = currentIdx > 0 ? learningDocs[currentIdx - 1] ?? null : null
+                                const nextDoc = currentIdx < learningDocs.length - 1 ? learningDocs[currentIdx + 1] ?? null : null
+                                const learningPlanSteps = doc.learningPlan?.steps ?? []
+                                const hasLearningPlan = learningPlanSteps.length > 0
+                                const docPlanProgress = learningPlanProgress[doc.id] ?? buildDefaultPlanProgress()
+                                const activePlanStepIndex = Math.min(
+                                    docPlanProgress.activeStepIndex,
+                                    Math.max(learningPlanSteps.length - 1, 0)
+                                )
+                                const activePlanStep = learningPlanSteps[activePlanStepIndex]
+                                const activeStepHasVideo = Boolean(activePlanStep?.media?.some((item) => item.type === "video"))
+                                const isVideoLesson = doc.type === "mp4" && Boolean(doc.url)
+                                const planVideoProgress = activePlanStep
+                                    ? videoProgressByDocId[getLearningVideoProgressKey(doc.id, activePlanStep.id)]
+                                    : undefined
+                                const directVideoProgress = videoProgressByDocId[getLearningVideoProgressKey(doc.id)]
+                                const requiredSeconds = hasLearningPlan
+                                    ? Math.max(activePlanStep?.estimatedSeconds ?? 0, Math.ceil(planVideoProgress?.duration ?? 0), 1)
+                                    : Math.ceil(directVideoProgress?.duration ?? 0) || LEARNING_REQUIRED_SECONDS
+                                const isCurrentLessonCompleted = isLeaderOrAdmin || learningProgress.completedDocIds.includes(doc.id)
+                                const isCourseCompleted = isLeaderOrAdmin || completedLearningCount >= learningDocs.length
+                                const canGoNext = !!nextDoc
+                                const prevPlanStep = hasLearningPlan && activePlanStepIndex > 0
+                                    ? learningPlanSteps[activePlanStepIndex - 1] ?? null
+                                    : null
+                                const nextPlanStep = hasLearningPlan && activePlanStepIndex < learningPlanSteps.length - 1
+                                    ? learningPlanSteps[activePlanStepIndex + 1] ?? null
+                                    : null
+                                const isActiveStepCompleted = hasLearningPlan && activePlanStep
+                                    ? isLeaderOrAdmin ||
+                                        docPlanProgress.completedStepIds.includes(activePlanStep.id) ||
+                                        learningRemainingSeconds <= 0
+                                    : false
+
+                                return (
+                                    <div className="max-w-3xl mx-auto px-6 py-8 space-y-5">
+                                        {/* Document viewer card */}
+                                        <div className="bg-white dark:bg-gray-900 rounded-2xl overflow-hidden shadow-sm border border-gray-200 dark:border-gray-800">
+                                            {/* Preview area */}
+                                            {hasLearningPlan && activePlanStep ? (
+                                                <div className="p-4 md:p-6 space-y-4 bg-[linear-gradient(180deg,rgba(241,245,249,0.85),rgba(248,250,252,0.95))] dark:bg-gray-900">
+                                                    <div className="flex items-center justify-between gap-3">
+                                                        <div>
+                                                            <p className="text-xs uppercase tracking-wide text-violet-500 dark:text-violet-400">Step học</p>
+                                                            <h3 className="text-base font-semibold text-gray-900 dark:text-white">
+                                                                {activePlanStep.title}
+                                                            </h3>
+                                                        </div>
+                                                        <span className="text-xs text-gray-500 dark:text-gray-400">
+                                                            {activePlanStepIndex + 1}/{learningPlanSteps.length}
+                                                        </span>
+                                                    </div>
+
+                                                    {doc.learningPlan?.sourceType === "pdf" && doc.url && activePlanStep.pageNumber ? (
+                                                        <div className="relative aspect-video rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 bg-white">
+                                                            <iframe
+                                                                key={`${doc.id}-${activePlanStep.id}`}
+                                                                title={`${doc.name}-page-${activePlanStep.pageNumber}`}
+                                                                src={`${doc.url}?step=${activePlanStep.id}#page=${activePlanStep.pageNumber}&view=FitH&zoom=page-fit&toolbar=0&navpanes=0&scrollbar=0&statusbar=0&messages=0`}
+                                                                className="block h-full w-[calc(100%+18px)] -mr-[18px] pointer-events-none select-none"
+                                                                scrolling="no"
+                                                            />
+                                                            <div className="absolute inset-0" aria-hidden="true" />
+                                                        </div>
+                                                    ) : (
+                                                        <div className="aspect-video rounded-xl border border-gray-200 dark:border-gray-700 bg-white/70 dark:bg-gray-800/60 grid place-items-center">
+                                                            <div className="text-center px-4">
+                                                                <BookOpen className="w-12 h-12 mx-auto text-violet-400 mb-3" />
+                                                                <p className="text-sm text-gray-700 dark:text-gray-200">
+                                                                    {activePlanStep.title}
+                                                                </p>
+                                                                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                                                    Nội dung slide được hiển thị theo từng bước học.
+                                                                </p>
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {activePlanStep.media && activePlanStep.media.length > 0 && (
+                                                        <div className="space-y-3">
+                                                            {activePlanStep.media.map((media) => (
+                                                                <div key={media.id} className="aspect-video rounded-xl overflow-hidden bg-black border border-gray-200 dark:border-gray-700">
+                                                                    <video
+                                                                        src={media.url}
+                                                                        controls
+                                                                        controlsList="nodownload"
+                                                                        disablePictureInPicture
+                                                                        className="w-full h-full"
+                                                                        onContextMenu={(e) => e.preventDefault()}
+                                                                        onLoadedMetadata={(e) =>
+                                                                            handleLearningVideoProgress(
+                                                                                doc.id,
+                                                                                e.currentTarget.currentTime,
+                                                                                e.currentTarget.duration,
+                                                                                activePlanStep.id
+                                                                            )
+                                                                        }
+                                                                        onTimeUpdate={(e) =>
+                                                                            handleLearningVideoProgress(
+                                                                                doc.id,
+                                                                                e.currentTarget.currentTime,
+                                                                                e.currentTarget.duration,
+                                                                                activePlanStep.id
+                                                                            )
+                                                                        }
+                                                                        onEnded={(e) =>
+                                                                            handleLearningVideoProgress(
+                                                                                doc.id,
+                                                                                e.currentTarget.duration,
+                                                                                e.currentTarget.duration,
+                                                                                activePlanStep.id
+                                                                            )
+                                                                        }
+                                                                    />
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+
+                                                    <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-white/80 dark:bg-gray-900/60 p-3">
+                                                        <div className="flex items-center justify-between gap-3">
+                                                            <Button
+                                                                type="button"
+                                                                variant="outline"
+                                                                className={`bg-transparent ${!prevPlanStep ? "invisible" : ""}`}
+                                                                onClick={() => {
+                                                                    if (!prevPlanStep) return
+                                                                    setLearningPlanProgress((prev) => {
+                                                                        const nextPlanProgress = {
+                                                                            ...prev,
+                                                                            [doc.id]: {
+                                                                                ...(prev[doc.id] ?? buildDefaultPlanProgress()),
+                                                                                activeStepIndex: Math.max(activePlanStepIndex - 1, 0),
+                                                                            },
+                                                                        }
+                                                                        void syncLearningProgressToServer(doc.id, learningProgress, nextPlanProgress)
+                                                                        return nextPlanProgress
+                                                                    })
+                                                                }}
+                                                            >
+                                                                <ChevronLeft className="w-4 h-4 mr-2" />
+                                                                Trang trước
+                                                            </Button>
+                                                            <p className="text-xs text-gray-500 dark:text-gray-400 text-center">
+                                                                {activePlanStep.kind === "page" ? `Trang ${activePlanStep.pageNumber}` : `Slide ${activePlanStep.slideNumber}`}
+                                                                {" · "}
+                                                                {activePlanStepIndex + 1}/{learningPlanSteps.length}
+                                                            </p>
+                                                            <Button
+                                                                type="button"
+                                                                variant={nextPlanStep && isActiveStepCompleted ? "default" : "outline"}
+                                                                className={
+                                                                    nextPlanStep
+                                                                        ? isActiveStepCompleted
+                                                                            ? "bg-violet-600 hover:bg-violet-700 text-white"
+                                                                            : "bg-transparent"
+                                                                        : "bg-transparent invisible"
+                                                                }
+                                                                onClick={() => {
+                                                                    if (!nextPlanStep) return
+                                                                    if (!isActiveStepCompleted) {
+                                                                        toast({
+                                                                            title: "Hoàn thành thời gian học của trang hiện tại trước khi qua trang tiếp theo.",
+                                                                            variant: "destructive",
+                                                                        })
+                                                                        return
+                                                                    }
+                                                                    setLearningPlanProgress((prev) => {
+                                                                        const nextPlanProgress = {
+                                                                            ...prev,
+                                                                            [doc.id]: {
+                                                                                ...(prev[doc.id] ?? buildDefaultPlanProgress()),
+                                                                                activeStepIndex: Math.min(activePlanStepIndex + 1, learningPlanSteps.length - 1),
+                                                                            },
+                                                                        }
+                                                                        void syncLearningProgressToServer(doc.id, learningProgress, nextPlanProgress)
+                                                                        return nextPlanProgress
+                                                                    })
+                                                                }}
+                                                            >
+                                                                {isActiveStepCompleted ? "Trang tiếp theo" : `Trang tiếp theo (${learningRemainingSeconds}s)`}
+                                                                <ChevronRight className="w-4 h-4 ml-2" />
+                                                            </Button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ) : isVideoLesson && doc.url ? (
+                                                <div className="aspect-video w-full bg-black">
+                                                    <video
+                                                        src={doc.url}
+                                                        controls
+                                                        controlsList="nodownload"
+                                                        disablePictureInPicture
+                                                        className="w-full h-full"
+                                                        onContextMenu={(e) => e.preventDefault()}
+                                                        onLoadedMetadata={(e) =>
+                                                            handleLearningVideoProgress(doc.id, e.currentTarget.currentTime, e.currentTarget.duration)
+                                                        }
+                                                        onTimeUpdate={(e) =>
+                                                            handleLearningVideoProgress(doc.id, e.currentTarget.currentTime, e.currentTarget.duration)
+                                                        }
+                                                        onEnded={(e) =>
+                                                            handleLearningVideoProgress(doc.id, e.currentTarget.duration, e.currentTarget.duration)
+                                                        }
+                                                    />
+                                                </div>
+                                            ) : doc.thumbnail ? (
+                                                <div className="aspect-video w-full overflow-hidden bg-black">
+                                                    <img src={doc.thumbnail} alt={doc.name} className="w-full h-full object-cover" />
+                                                </div>
+                                            ) : doc.url ? (
+                                                <div className="aspect-video w-full bg-gradient-to-br from-violet-100 to-blue-100 dark:from-violet-950/40 dark:to-blue-950/40 flex flex-col items-center justify-center gap-4">
+                                                    <BookOpen className="w-16 h-16 text-violet-300 dark:text-violet-600" />
+                                                    <a
+                                                        href={doc.url}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="inline-flex items-center gap-2 px-5 py-2.5 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-sm font-medium transition-colors shadow"
+                                                    >
+                                                        <Eye className="w-4 h-4" />Mở tài liệu
+                                                    </a>
+                                                </div>
+                                            ) : (
+                                                <div className={`aspect-video w-full ${docType.bgColor} flex items-center justify-center`}>
+                                                    <span className="text-7xl">{docType.icon}</span>
+                                                </div>
+                                            )}
+
+                                            {/* Doc info */}
+                                            <div className="p-6">
+                                                <div className="flex items-start justify-between gap-4">
+                                                    <div className="flex-1 min-w-0">
+                                                        <h1 className="text-xl font-bold text-gray-900 dark:text-white leading-snug">{doc.name}</h1>
+                                                        {doc.description && (
+                                                            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1.5">{doc.description}</p>
+                                                        )}
+                                                    </div>
+                                                    <div className="flex items-center gap-2 flex-shrink-0">
+                                                        {doc.url && isLeaderOrAdmin && (
+                                                            <Button size="sm" variant="outline" className="bg-transparent"
+                                                                onClick={() => window.open(doc.url, "_blank")}>
+                                                                <Eye className="w-4 h-4 mr-1.5" />Xem tài liệu
+                                                            </Button>
+                                                        )}
+                                                        {isLeaderOrAdmin && (
+                                                            <DropdownMenu>
+                                                                <DropdownMenuTrigger asChild>
+                                                                    <Button size="sm" variant="ghost" className="h-8 w-8 p-0">
+                                                                        <MoreHorizontal className="w-4 h-4" />
+                                                                    </Button>
+                                                                </DropdownMenuTrigger>
+                                                                <DropdownMenuContent align="end">
+                                                                    <DropdownMenuItem onClick={() => handleOpenQuizCreate(doc)}>
+                                                                        <Pencil className="w-4 h-4 mr-2" />{quiz ? "Sửa quiz" : "Tạo quiz"}
+                                                                    </DropdownMenuItem>
+                                                                    {quiz && (
+                                                                        <DropdownMenuItem onClick={() => void handleOpenQuizResults(doc)}>
+                                                                            <Users className="w-4 h-4 mr-2" />Xem kết quả nhân viên
+                                                                        </DropdownMenuItem>
+                                                                    )}
+                                                                </DropdownMenuContent>
+                                                            </DropdownMenu>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {!isLeaderOrAdmin && (
+                                            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 shadow-sm p-5">
+                                                <div className="flex items-start justify-between gap-4 flex-wrap">
+                                                    <div>
+                                                        <p className="text-xs uppercase tracking-wide text-violet-500 dark:text-violet-400">Học liệu bắt buộc</p>
+                                                        <h3 className="text-base font-semibold text-gray-900 dark:text-white mt-1">
+                                                            {hasLearningPlan
+                                                                ? `Hoàn thành toàn bộ khóa học trước khi qua trang tiếp theo`
+                                                                : `Hoàn thành ${requiredSeconds} giây học trước khi qua bài tiếp theo`}
+                                                        </h3>
+                                                        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                                                            {isCurrentLessonCompleted
+                                                                ? "Bài này đã được đánh dấu học xong."
+                                                                : learningRemainingSeconds > 0
+                                                                    ? `Bạn còn ${learningRemainingSeconds}s để đủ điều kiện hoàn thành bài học.`
+                                                                    : hasLearningPlan && activeStepHasVideo
+                                                                        ? "Bạn đã xem xong video của step này."
+                                                                        : isVideoLesson
+                                                                        ? "Bạn đã xem hết video, bài học được hoàn thành."
+                                                                        : "Bạn đã đủ thời gian, hãy bấm Đánh dấu đã học xong."}
+                                                        </p>
+                                                        {!isLeaderOrAdmin && (isVideoLesson || (hasLearningPlan && activeStepHasVideo)) && (
+                                                            <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                                                                Có thể tua tới hoặc tua lùi video. Tải xuống đã bị tắt trong trình phát.
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-semibold ${
+                                                            learningRemainingSeconds > 0 && !isCurrentLessonCompleted
+                                                                ? "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300"
+                                                                : "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300"
+                                                        }`}>
+                                                            <Timer className="w-4 h-4" />
+                                                            {isCurrentLessonCompleted ? "Đã hoàn thành" : `${learningRemainingSeconds}s`}
+                                                        </span>
+                                                        <Button
+                                                            size="sm"
+                                                            disabled={hasLearningPlan || isVideoLesson || isCurrentLessonCompleted || learningRemainingSeconds > 0}
+                                                            onClick={() => handleMarkLessonCompleted(doc.id)}
+                                                            className="bg-violet-600 hover:bg-violet-700 text-white disabled:opacity-60"
+                                                        >
+                                                            <CheckCircle2 className="w-4 h-4 mr-1.5" />
+                                                            Đánh dấu đã học xong
+                                                        </Button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Quiz section */}
+                                        {quiz ? (
+                                            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 shadow-sm overflow-hidden">
+                                                <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-800 bg-violet-50 dark:bg-violet-900/20 flex items-center gap-2">
+                                                    <ClipboardCheck className="w-5 h-5 text-violet-600 dark:text-violet-400" />
+                                                    <h2 className="font-semibold text-gray-900 dark:text-white">Bài kiểm tra</h2>
+                                                </div>
+                                                <div className="p-6">
+                                                    <h3 className="font-semibold text-gray-900 dark:text-white mb-1">{quiz.title}</h3>
+                                                    {quiz.description && (
+                                                        <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">{quiz.description}</p>
+                                                    )}
+                                                    <div className="flex items-center gap-5 text-sm text-gray-500 dark:text-gray-400 mb-6">
+                                                        <span className="flex items-center gap-1.5"><ClipboardCheck className="w-4 h-4 text-violet-400" />{quiz.questions.length} câu hỏi</span>
+                                                        <span className="flex items-center gap-1.5"><Timer className="w-4 h-4 text-violet-400" />{quiz.durationMinutes} phút</span>
+                                                    </div>
+
+                                                    {!isLeaderOrAdmin && (
+                                                        attempt ? (
+                                                            <div className="space-y-4">
+                                                                <div className={`flex items-center gap-5 p-5 rounded-xl ${attempt.score >= 80 ? "bg-green-50 dark:bg-green-900/20" : attempt.score >= 50 ? "bg-amber-50 dark:bg-amber-900/20" : "bg-red-50 dark:bg-red-900/20"}`}>
+                                                                    <Trophy className={`w-9 h-9 flex-shrink-0 ${attempt.score >= 80 ? "text-green-500" : attempt.score >= 50 ? "text-amber-500" : "text-red-500"}`} />
+                                                                    <div>
+                                                                        <p className="text-3xl font-bold text-gray-900 dark:text-white">
+                                                                            {attempt.score}<span className="text-base font-normal text-gray-400 ml-1">/100 điểm</span>
+                                                                        </p>
+                                                                        <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
+                                                                            {attempt.correctAnswers}/{attempt.totalQuestions} câu đúng · {new Date(attempt.submittedAt).toLocaleDateString("vi-VN")}
+                                                                        </p>
+                                                                    </div>
+                                                                </div>
+                                                                <Button variant="outline" className="bg-transparent"
+                                                                    onClick={() => setQuizTakeModal((prev) => ({ ...prev, open: true, quiz, documentId: doc.id, isSubmitted: true, result: attempt }))}>
+                                                                    <BarChart2 className="w-4 h-4 mr-2" />Xem lại đáp án
+                                                                </Button>
+                                                            </div>
+                                                        ) : (
+                                                            <div className="space-y-3">
+                                                                <Button
+                                                                    className="bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-60"
+                                                                    disabled={!isCourseCompleted}
+                                                                    onClick={() => handleOpenQuizTake(doc)}
+                                                                >
+                                                                    <ClipboardCheck className="w-4 h-4 mr-2" />Bắt đầu kiểm tra
+                                                                </Button>
+                                                                {!isCourseCompleted && (
+                                                                    <p className="text-sm text-amber-600 dark:text-amber-400">
+                                                                        Bạn cần hoàn thành toàn bộ khóa học trước khi làm bài kiểm tra.
+                                                                    </p>
+                                                                )}
+                                                            </div>
+                                                        )
+                                                    )}
+
+                                                    {isLeaderOrAdmin && (
+                                                        <div className="flex gap-3">
+                                                            <Button variant="outline" className="bg-transparent"
+                                                                onClick={() => handleOpenQuizCreate(doc)}>
+                                                                <Pencil className="w-4 h-4 mr-2" />Sửa quiz
+                                                            </Button>
+                                                            <Button variant="outline" className="bg-transparent"
+                                                                onClick={() => void handleOpenQuizResults(doc)}>
+                                                                <Users className="w-4 h-4 mr-2" />Xem kết quả nhân viên
+                                                            </Button>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ) : isLeaderOrAdmin ? (
+                                            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-dashed border-gray-300 dark:border-gray-700 p-10 text-center">
+                                                <ClipboardCheck className="w-10 h-10 mx-auto mb-3 text-gray-300 dark:text-gray-600" />
+                                                <p className="text-sm font-medium text-gray-600 dark:text-gray-400 mb-4">Chưa có bài kiểm tra cho tài liệu này</p>
+                                                <Button size="sm" onClick={() => handleOpenQuizCreate(doc)}>
+                                                    <Plus className="w-4 h-4 mr-2" />Tạo bài kiểm tra
+                                                </Button>
+                                            </div>
+                                        ) : (
+                                            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-10 text-center">
+                                                <ClipboardCheck className="w-10 h-10 mx-auto mb-3 text-gray-300 dark:text-gray-600" />
+                                                <p className="text-sm text-gray-500 dark:text-gray-400">Chưa có bài kiểm tra cho tài liệu này.</p>
+                                            </div>
+                                        )}
+
+                                        {/* Navigation */}
+                                        <div className="flex items-center justify-between pt-2 pb-4">
+                                            <Button
+                                                variant="outline"
+                                                className={`bg-transparent ${!prevDoc ? "invisible" : ""}`}
+                                                onClick={() => prevDoc && setSelectedLearningDoc(prevDoc)}
+                                            >
+                                                <ChevronLeft className="w-4 h-4 mr-2" />Bài trước
+                                            </Button>
+                                            <span className="text-sm text-gray-400 dark:text-gray-500">
+                                                {currentIdx + 1} / {learningDocs.length}
+                                            </span>
+                                            <Button
+                                                variant={nextDoc && canGoNext ? "default" : "outline"}
+                                                className={nextDoc ? (canGoNext ? "bg-violet-600 hover:bg-violet-700 text-white" : "bg-transparent") : "bg-transparent invisible"}
+                                                onClick={() => {
+                                                    if (!nextDoc) return
+                                                    if (!canGoNext) {
+                                                        toast({
+                                                            title: "Hoàn thành bài hiện tại trước khi chuyển bài tiếp theo.",
+                                                            variant: "destructive",
+                                                        })
+                                                        return
+                                                    }
+                                                    setSelectedLearningDoc(nextDoc)
+                                                }}
+                                            >
+                                                Bài tiếp theo<ChevronRight className="w-4 h-4 ml-2" />
+                                            </Button>
+                                        </div>
+                                    </div>
+                                )
+                            })()}
+                        </div>
+                    </div>
+                )
+            )}
+
+            {/* ── Tài liệu tab ── */}
+            {activeTab === "all" && <>
 
             {/* Folders section */}
             <div className="mb-6">
@@ -843,6 +2354,11 @@ export default function DocumentsPage() {
                                 onClick={() => void handleMoveDocument(contextMenu.document)}>
                                 <Move className="w-4 h-4 mr-2" />Di chuyển
                             </button>
+                            <button className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
+                                onClick={() => { void handleMarkAsLearning(contextMenu.document.id, !contextMenu.document.isLearningMaterial); setContextMenu(null) }}>
+                                <GraduationCap className="w-4 h-4 mr-2" />
+                                {contextMenu.document.isLearningMaterial ? "Bỏ Học liệu" : "Đánh dấu Học liệu"}
+                            </button>
                             <div className="border-t border-gray-200 dark:border-gray-700 my-1" />
                             <button className="w-full px-4 py-2 text-left text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center"
                                 onClick={() => void handleDeleteDocument(contextMenu.document.id)}>
@@ -1043,35 +2559,30 @@ export default function DocumentsPage() {
                         <div className="space-y-3">
                             <Input
                                 type="file"
+                                accept=".pdf,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation"
                                 onChange={(e) => {
                                     const file = e.target.files?.[0] ?? null
                                     setCreateDocumentDialog((s) => ({
                                         ...s,
                                         file,
-                                        name: file ? file.name : s.name,
+                                        name: s.name.trim() ? s.name : (file?.name ?? ""),
                                     }))
                                 }}
                             />
-                            <Input
-                                placeholder="Tên file (tuỳ chọn, mặc định lấy theo file đã chọn)"
-                                value={createDocumentDialog.name}
-                                onChange={(e) => setCreateDocumentDialog((s) => ({ ...s, name: e.target.value }))}
-                            />
-                            <Input
-                                placeholder="Link đính kèm (tuỳ chọn) - https://..."
-                                value={createDocumentDialog.link}
-                                onChange={(e) => setCreateDocumentDialog((s) => ({ ...s, link: e.target.value }))}
-                            />
-                            <Input
-                                placeholder="Ảnh xem trước URL (tuỳ chọn) - https://..."
-                                value={createDocumentDialog.thumbnail}
-                                onChange={(e) => setCreateDocumentDialog((s) => ({ ...s, thumbnail: e.target.value }))}
-                            />
+                            <div className="space-y-1">
+                                <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Tên tài liệu</p>
+                                <Input
+                                    placeholder="Nhập tên tài liệu (mặc định theo tên file)"
+                                    value={createDocumentDialog.name}
+                                    onChange={(e) =>
+                                        setCreateDocumentDialog((s) => ({ ...s, name: e.target.value }))
+                                    }
+                                />
+                            </div>
+                            <p className="text-xs text-gray-500 dark:text-gray-400">
+                                Chỉ nhận file định dạng PDF hoặc PPTX.
+                            </p>
                         </div>
-
-                        {createDocumentDialog.thumbnail && (
-                            <img src={createDocumentDialog.thumbnail} alt="preview" className="w-full h-40 object-cover rounded-lg border" onError={(e) => (e.currentTarget.style.display = "none")} />
-                        )}
                         <VisibilityPicker
                             user={user}
                             visibility={createDocumentDialog.visibility}
@@ -1136,16 +2647,15 @@ export default function DocumentsPage() {
                             <Button
                                 disabled={
                                     isSubmitting ||
-                                    !(
-                                        createDocumentDialog.file ||
-                                        createDocumentDialog.name.trim() ||
-                                        createDocumentDialog.link.trim() ||
-                                        createDocumentDialog.thumbnail.trim()
-                                    )
+                                    !createDocumentDialog.file
                                 }
                                 onClick={() => void handleCreateDocument()}
                             >
-                                Tạo
+                                {isSubmitting && createDocumentDialog.file
+                                    ? "Đang upload..."
+                                    : isSubmitting
+                                        ? "Đang tạo..."
+                                        : "Tạo"}
                             </Button>
                         </div>
                     </div>
@@ -1223,6 +2733,381 @@ export default function DocumentsPage() {
                     </div>
                 </div>
             )}
+
+            </> /* end activeTab === "all" */}
+
+            {/* ── Quiz Create Dialog ───────────────────────────────────── */}
+            {quizCreateDialog.open && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+                    <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+                        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-200 dark:border-gray-700">
+                            <div>
+                                <h2 className="text-lg font-bold text-gray-900 dark:text-white">
+                                    {quizCreateDialog.existingQuizId ? "Sửa quiz" : "Tạo quiz"} · {quizCreateDialog.documentName}
+                                </h2>
+                                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Tạo bài kiểm tra trắc nghiệm cho tài liệu học</p>
+                            </div>
+                            <button onClick={() => setQuizCreateDialog(defaultQuizCreate())} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <div className="overflow-y-auto flex-1 px-6 py-4 space-y-4">
+                            {quizCreateDialog.isNewDocument && (
+                                <div>
+                                    <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1.5">
+                                        Tên bài kiểm tra <span className="text-red-500">*</span>
+                                    </label>
+                                    <Input
+                                        autoFocus
+                                        placeholder="Nhập tên bài kiểm tra..."
+                                        value={quizCreateDialog.documentName}
+                                        onChange={(e) => setQuizCreateDialog((s) => ({ ...s, documentName: e.target.value, title: e.target.value }))}
+                                    />
+                                </div>
+                            )}
+                            <Input placeholder="Tiêu đề quiz" value={quizCreateDialog.title}
+                                onChange={(e) => setQuizCreateDialog((s) => ({ ...s, title: e.target.value }))} />
+                            <Input placeholder="Mô tả (tuỳ chọn)" value={quizCreateDialog.description}
+                                onChange={(e) => setQuizCreateDialog((s) => ({ ...s, description: e.target.value }))} />
+                            <div className="flex items-center gap-2">
+                                <Timer className="w-4 h-4 text-gray-400" />
+                                <Input type="number" min={5} placeholder="Thời lượng (phút)" className="w-40"
+                                    value={quizCreateDialog.durationMinutes}
+                                    onChange={(e) => setQuizCreateDialog((s) => ({ ...s, durationMinutes: e.target.value }))} />
+                                <span className="text-sm text-gray-500">phút</span>
+                            </div>
+
+                            <div className="space-y-4">
+                                <div className="flex items-center justify-between">
+                                    <p className="text-sm font-semibold text-gray-700 dark:text-gray-300">Câu hỏi ({quizCreateDialog.questions.length})</p>
+                                    <Button size="sm" variant="outline" className="bg-transparent text-xs h-8"
+                                        onClick={handleAddQuizQuestion}>
+                                        <Plus className="w-3.5 h-3.5 mr-1" />Thêm câu hỏi
+                                    </Button>
+                                </div>
+                                {quizCreateDialog.questions.map((q, qi) => (
+                                    <div key={qi} className="border border-gray-200 dark:border-gray-700 rounded-xl p-4 space-y-3 bg-gray-50 dark:bg-gray-900/30">
+                                        <div className="flex items-start gap-2">
+                                            <span className="text-xs font-bold text-gray-400 mt-2.5 w-5 flex-shrink-0">Q{qi + 1}</span>
+                                            <Input placeholder="Nội dung câu hỏi" value={q.text}
+                                                onChange={(e) => setQuizCreateDialog((s) => {
+                                                    const questions = [...s.questions]
+                                                    questions[qi] = { ...questions[qi]!, text: e.target.value }
+                                                    return { ...s, questions }
+                                                })} />
+                                            {quizCreateDialog.questions.length > 1 && (
+                                                <button onClick={() => handleRemoveQuizQuestion(qi)}
+                                                    className="text-red-400 hover:text-red-600 mt-2 flex-shrink-0">
+                                                    <X className="w-4 h-4" />
+                                                </button>
+                                            )}
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            {q.options.map((opt, oi) => (
+                                                <div key={oi} className={`flex items-center gap-2 p-2 rounded-lg border ${q.correctIndex === oi ? "border-green-500 bg-green-50 dark:bg-green-900/20" : "border-gray-200 dark:border-gray-700"}`}>
+                                                    <button onClick={() => setQuizCreateDialog((s) => {
+                                                        const questions = [...s.questions]
+                                                        questions[qi] = { ...questions[qi]!, correctIndex: oi }
+                                                        return { ...s, questions }
+                                                    })} className={`w-5 h-5 rounded-full border-2 flex-shrink-0 flex items-center justify-center ${q.correctIndex === oi ? "border-green-500 bg-green-500" : "border-gray-300"}`}>
+                                                        {q.correctIndex === oi && <span className="text-white text-xs">✓</span>}
+                                                    </button>
+                                                    <span className="text-xs font-bold text-gray-400 flex-shrink-0">{["A","B","C","D"][oi]}</span>
+                                                    <input className="flex-1 text-sm bg-transparent outline-none text-gray-900 dark:text-white"
+                                                        placeholder={`Đáp án ${["A","B","C","D"][oi]}`} value={opt}
+                                                        onChange={(e) => setQuizCreateDialog((s) => {
+                                                            const questions = [...s.questions]
+                                                            const options = [...questions[qi]!.options] as [string,string,string,string]
+                                                            options[oi] = e.target.value
+                                                            questions[qi] = { ...questions[qi]!, options }
+                                                            return { ...s, questions }
+                                                        })} />
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <Input placeholder="Giải thích đáp án (tuỳ chọn)" className="text-xs"
+                                            value={q.explanation}
+                                            onChange={(e) => setQuizCreateDialog((s) => {
+                                                const questions = [...s.questions]
+                                                questions[qi] = { ...questions[qi]!, explanation: e.target.value }
+                                                return { ...s, questions }
+                                            })} />
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="flex gap-2 justify-end px-6 py-4 border-t border-gray-200 dark:border-gray-700">
+                            <Button variant="outline" className="bg-transparent" onClick={() => setQuizCreateDialog(defaultQuizCreate())}>Huỷ</Button>
+                            <Button disabled={isSubmitting} onClick={() => void handleSaveQuiz()} className="bg-violet-600 hover:bg-violet-700">
+                                <ClipboardCheck className="w-4 h-4 mr-2" />
+                                {isSubmitting ? "Đang lưu..." : (quizCreateDialog.existingQuizId ? "Cập nhật" : "Tạo quiz")}
+                            </Button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Quiz Take Modal ──────────────────────────────────────── */}
+            {quizTakeModal.open && quizTakeModal.quiz && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+                    <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+                        {!quizTakeModal.isSubmitted ? (
+                            <>
+                                {/* Header + timer */}
+                                <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-200 dark:border-gray-700">
+                                    <div>
+                                        <h2 className="text-lg font-bold text-gray-900 dark:text-white">{quizTakeModal.quiz.title}</h2>
+                                        <p className="text-xs text-gray-500 mt-0.5">
+                                            Câu {quizTakeModal.currentQuestion + 1}/{quizTakeModal.quiz.questions.length}
+                                        </p>
+                                    </div>
+                                    <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-mono font-bold ${quizTakeModal.timeLeftSeconds < 60 ? "bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400" : "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"}`}>
+                                        <Timer className="w-4 h-4" />
+                                        {String(Math.floor(quizTakeModal.timeLeftSeconds / 60)).padStart(2, "0")}:{String(quizTakeModal.timeLeftSeconds % 60).padStart(2, "0")}
+                                    </div>
+                                </div>
+
+                                {/* Question */}
+                                <div className="flex-1 overflow-y-auto px-6 py-5">
+                                    {(() => {
+                                        const q = quizTakeModal.quiz.questions[quizTakeModal.currentQuestion]!
+                                        return (
+                                            <div className="space-y-4">
+                                                <p className="text-base font-medium text-gray-900 dark:text-white">{q.text}</p>
+                                                <div className="space-y-3">
+                                                    {q.options.map((opt, oi) => {
+                                                        const selected = quizTakeModal.answers[quizTakeModal.currentQuestion] === oi
+                                                        return (
+                                                            <button key={oi} onClick={() => setQuizTakeModal((prev) => {
+                                                                const answers = [...prev.answers]
+                                                                answers[prev.currentQuestion] = oi
+                                                                return { ...prev, answers }
+                                                            })}
+                                                                className={`w-full text-left flex items-center gap-3 px-4 py-3 rounded-xl border-2 transition-all ${selected ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20" : "border-gray-200 dark:border-gray-700 hover:border-blue-300 dark:hover:border-blue-600"}`}>
+                                                                <span className={`w-6 h-6 rounded-full border-2 flex-shrink-0 flex items-center justify-center text-xs font-bold ${selected ? "border-blue-500 bg-blue-500 text-white" : "border-gray-300 text-gray-400"}`}>
+                                                                    {["A","B","C","D"][oi]}
+                                                                </span>
+                                                                <span className="text-sm text-gray-800 dark:text-gray-200">{opt}</span>
+                                                            </button>
+                                                        )
+                                                    })}
+                                                </div>
+                                                {/* Progress dots */}
+                                                <div className="flex gap-1.5 flex-wrap pt-2">
+                                                    {quizTakeModal.quiz.questions.map((_, i) => (
+                                                        <button key={i} onClick={() => setQuizTakeModal((prev) => ({ ...prev, currentQuestion: i }))}
+                                                            className={`w-7 h-7 rounded-full text-xs font-medium transition-all ${i === quizTakeModal.currentQuestion ? "bg-blue-600 text-white" : quizTakeModal.answers[i] !== -1 ? "bg-green-500 text-white" : "bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-400"}`}>
+                                                            {i + 1}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )
+                                    })()}
+                                </div>
+
+                                {/* Navigation */}
+                                <div className="flex items-center justify-between px-6 py-4 border-t border-gray-200 dark:border-gray-700">
+                                    <Button variant="outline" className="bg-transparent" disabled={quizTakeModal.currentQuestion === 0}
+                                        onClick={() => setQuizTakeModal((prev) => ({ ...prev, currentQuestion: prev.currentQuestion - 1 }))}>
+                                        <ChevronLeft className="w-4 h-4 mr-1" />Trước
+                                    </Button>
+                                    {quizTakeModal.currentQuestion < quizTakeModal.quiz.questions.length - 1 ? (
+                                        <Button onClick={() => setQuizTakeModal((prev) => ({ ...prev, currentQuestion: prev.currentQuestion + 1 }))}>
+                                            Tiếp <ChevronRight className="w-4 h-4 ml-1" />
+                                        </Button>
+                                    ) : (
+                                        <Button disabled={quizTakeModal.isSubmitting} onClick={() => void handleSubmitQuiz()}
+                                            className="bg-green-600 hover:bg-green-700">
+                                            <CheckCircle2 className="w-4 h-4 mr-2" />
+                                            {quizTakeModal.isSubmitting ? "Đang nộp..." : "Nộp bài"}
+                                        </Button>
+                                    )}
+                                </div>
+                            </>
+                        ) : (
+                            /* Result screen */
+                            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
+                                <div className={`w-20 h-20 rounded-full flex items-center justify-center mb-4 ${
+                                    (quizTakeModal.result?.score ?? 0) >= 80 ? "bg-green-100 dark:bg-green-900/30" :
+                                    (quizTakeModal.result?.score ?? 0) >= 50 ? "bg-yellow-100 dark:bg-yellow-900/30" : "bg-red-100 dark:bg-red-900/30"
+                                }`}>
+                                    <Trophy className={`w-10 h-10 ${
+                                        (quizTakeModal.result?.score ?? 0) >= 80 ? "text-green-600" :
+                                        (quizTakeModal.result?.score ?? 0) >= 50 ? "text-yellow-500" : "text-red-500"
+                                    }`} />
+                                </div>
+                                <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-1">
+                                    {quizTakeModal.result?.score}/100 điểm
+                                </h2>
+                                <p className="text-gray-500 dark:text-gray-400 mb-6">
+                                    {quizTakeModal.result?.correctAnswers}/{quizTakeModal.result?.totalQuestions} câu đúng
+                                </p>
+                                {/* Per-question review */}
+                                {quizTakeModal.result?.reviewQuestions && (
+                                    <div className="w-full space-y-3 text-left max-h-64 overflow-y-auto">
+                                        {quizTakeModal.result.reviewQuestions.map((rq, i) => {
+                                            const myAns = quizTakeModal.result!.answers[i]
+                                            const correct = rq.correctIndex!
+                                            const isCorrect = myAns === correct
+                                            return (
+                                                <div key={i} className={`rounded-xl border p-3 ${isCorrect ? "border-green-300 bg-green-50 dark:bg-green-900/10" : "border-red-300 bg-red-50 dark:bg-red-900/10"}`}>
+                                                    <div className="flex items-start gap-2 mb-1">
+                                                        {isCorrect ? <CheckCircle2 className="w-4 h-4 text-green-600 flex-shrink-0 mt-0.5" /> : <XCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />}
+                                                        <p className="text-sm font-medium text-gray-800 dark:text-gray-200">{rq.text}</p>
+                                                    </div>
+                                                    <p className="text-xs text-gray-500 pl-6">
+                                                        Đáp án đúng: <strong>{["A","B","C","D"][correct]} — {rq.options[correct]}</strong>
+                                                        {!isCorrect && myAns >= 0 && <> · Bạn chọn: {["A","B","C","D"][myAns]}</>}
+                                                    </p>
+                                                    {rq.explanation && <p className="text-xs text-blue-600 dark:text-blue-400 pl-6 mt-1">{rq.explanation}</p>}
+                                                </div>
+                                            )
+                                        })}
+                                    </div>
+                                )}
+                                <Button className="mt-6" onClick={() => setQuizTakeModal(defaultQuizTake())}>Đóng</Button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* ── Quiz Results Modal (Leader) ──────────────────────────── */}
+            {quizResultsModal.open && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+                    <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] flex flex-col">
+                        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-200 dark:border-gray-700">
+                            <div>
+                                <h2 className="text-lg font-bold text-gray-900 dark:text-white">Kết quả quiz</h2>
+                                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{quizResultsModal.documentName}</p>
+                            </div>
+                            <button onClick={() => setQuizResultsModal((s) => ({ ...s, open: false }))}
+                                className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto px-6 py-4">
+                            {quizResultsModal.isLoading ? (
+                                <p className="text-sm text-gray-500 text-center py-8">Đang tải...</p>
+                            ) : (
+                                <div className="space-y-3">
+                                    {(() => {
+                                        const completed = quizResultsModal.learningStatuses.filter((item) => item.status === "completed")
+                                        const inProgress = quizResultsModal.learningStatuses.filter((item) => item.status === "in_progress")
+                                        const notStarted = quizResultsModal.learningStatuses.filter((item) => item.status === "not_started")
+                                        return (
+                                            <>
+                                                <div>
+                                                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">Trạng thái học nhân viên</h3>
+                                                    <div className="grid grid-cols-3 gap-3 mb-3">
+                                                        <div className="text-center px-3 py-2 rounded-xl bg-green-50 dark:bg-green-900/20">
+                                                            <p className="text-lg font-bold text-green-700 dark:text-green-300">{completed.length}</p>
+                                                            <p className="text-xs text-green-600 dark:text-green-400">Đã học</p>
+                                                        </div>
+                                                        <div className="text-center px-3 py-2 rounded-xl bg-amber-50 dark:bg-amber-900/20">
+                                                            <p className="text-lg font-bold text-amber-700 dark:text-amber-300">{inProgress.length}</p>
+                                                            <p className="text-xs text-amber-600 dark:text-amber-400">Đang học</p>
+                                                        </div>
+                                                        <div className="text-center px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-700/40">
+                                                            <p className="text-lg font-bold text-gray-700 dark:text-gray-200">{notStarted.length}</p>
+                                                            <p className="text-xs text-gray-600 dark:text-gray-400">Chưa học</p>
+                                                        </div>
+                                                    </div>
+                                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                                        <div className="rounded-xl border border-green-200 dark:border-green-800 bg-green-50/70 dark:bg-green-900/10 p-3">
+                                                            <p className="text-xs font-semibold text-green-700 dark:text-green-300 mb-2">Đã học</p>
+                                                            <div className="space-y-1 max-h-40 overflow-y-auto">
+                                                                {completed.length === 0 ? (
+                                                                    <p className="text-xs text-green-700/70 dark:text-green-300/70">Chưa có</p>
+                                                                ) : completed.map((item) => (
+                                                                    <p key={item.personId} className="text-xs text-green-900 dark:text-green-200">{item.personName}</p>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                        <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50/70 dark:bg-amber-900/10 p-3">
+                                                            <p className="text-xs font-semibold text-amber-700 dark:text-amber-300 mb-2">Đang học</p>
+                                                            <div className="space-y-1 max-h-40 overflow-y-auto">
+                                                                {inProgress.length === 0 ? (
+                                                                    <p className="text-xs text-amber-700/70 dark:text-amber-300/70">Chưa có</p>
+                                                                ) : inProgress.map((item) => (
+                                                                    <p key={item.personId} className="text-xs text-amber-900 dark:text-amber-200">{item.personName}</p>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                        <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-900/30 p-3">
+                                                            <p className="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">Chưa học</p>
+                                                            <div className="space-y-1 max-h-40 overflow-y-auto">
+                                                                {notStarted.length === 0 ? (
+                                                                    <p className="text-xs text-gray-500 dark:text-gray-400">Chưa có</p>
+                                                                ) : notStarted.map((item) => (
+                                                                    <p key={item.personId} className="text-xs text-gray-800 dark:text-gray-200">{item.personName}</p>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div className="pt-2">
+                                                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">Kết quả quiz</h3>
+                                                    {quizResultsModal.attempts.length === 0 ? (
+                                                        <div className="text-center py-8 rounded-xl border border-dashed border-gray-200 dark:border-gray-700">
+                                                            <Users className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+                                                            <p className="text-sm text-gray-500 dark:text-gray-400">Chưa có nhân viên nào làm bài.</p>
+                                                        </div>
+                                                    ) : (
+                                                        <>
+                                                            <div className="grid grid-cols-3 gap-3 mb-4">
+                                                                <div className="text-center px-3 py-2 rounded-xl bg-blue-50 dark:bg-blue-900/20">
+                                                                    <p className="text-lg font-bold text-blue-700 dark:text-blue-300">{quizResultsModal.attempts.length}</p>
+                                                                    <p className="text-xs text-blue-600 dark:text-blue-400">Đã nộp</p>
+                                                                </div>
+                                                                <div className="text-center px-3 py-2 rounded-xl bg-green-50 dark:bg-green-900/20">
+                                                                    <p className="text-lg font-bold text-green-700 dark:text-green-300">
+                                                                        {Math.round(quizResultsModal.attempts.reduce((s, a) => s + a.score, 0) / quizResultsModal.attempts.length)}
+                                                                    </p>
+                                                                    <p className="text-xs text-green-600 dark:text-green-400">Điểm TB</p>
+                                                                </div>
+                                                                <div className="text-center px-3 py-2 rounded-xl bg-violet-50 dark:bg-violet-900/20">
+                                                                    <p className="text-lg font-bold text-violet-700 dark:text-violet-300">
+                                                                        {quizResultsModal.attempts.filter((a) => a.score >= 80).length}
+                                                                    </p>
+                                                                    <p className="text-xs text-violet-600 dark:text-violet-400">Đạt ≥80</p>
+                                                                </div>
+                                                            </div>
+                                                            {quizResultsModal.attempts.map((att) => (
+                                                                <div key={att.id} className="flex items-center justify-between px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/30">
+                                                                    <div className="flex items-center gap-3">
+                                                                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white ${att.score >= 80 ? "bg-green-500" : att.score >= 50 ? "bg-yellow-500" : "bg-red-500"}`}>
+                                                                            {att.personName?.[0] ?? "?"}
+                                                                        </div>
+                                                                        <div>
+                                                                            <p className="text-sm font-medium text-gray-900 dark:text-white">{att.personName ?? "Unknown"}</p>
+                                                                            <p className="text-xs text-gray-500 dark:text-gray-400">
+                                                                                {att.correctAnswers}/{att.totalQuestions} câu · {new Date(att.submittedAt).toLocaleDateString("vi-VN")}
+                                                                            </p>
+                                                                        </div>
+                                                                    </div>
+                                                                    <span className={`text-base font-bold ${att.score >= 80 ? "text-green-600" : att.score >= 50 ? "text-yellow-500" : "text-red-500"}`}>
+                                                                        {att.score}đ
+                                                                    </span>
+                                                                </div>
+                                                            ))}
+                                                        </>
+                                                    )}
+                                                </div>
+                                            </>
+                                        )
+                                    })()}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
         </div>
     )
 }
