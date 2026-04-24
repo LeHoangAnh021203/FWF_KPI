@@ -1115,6 +1115,78 @@ export async function getWorkspaceRealtimePersonIds(projectId: string) {
   return Array.from(new Set([...(project?.memberIds ?? []), ...adminPersonIds]));
 }
 
+export async function getDocumentRealtimeAudience(documentId: string) {
+  const db = await getMongoDb();
+  const [document, allPeople, allUsers] = await Promise.all([
+    db.collection<DbDocument>("documents").findOne({ _id: documentId }),
+    db.collection<DbPerson>("people").find().toArray(),
+    db.collection<DbUser>("users").find({}, { projection: { personId: 1, role: 1 } }).toArray(),
+  ]);
+
+  if (!document) {
+    return { personIds: [] as string[], documentName: documentId };
+  }
+
+  const mappedPeople = allPeople.map(mapDbPerson);
+  const personById = new Map(mappedPeople.map((person) => [person.id, person]));
+  const personTeamMap = new Map(allPeople.map((person) => [person._id, person.teamId]));
+  const personRolesMap = new Map<string, Set<UserRole>>();
+  for (const user of allUsers) {
+    if (!user.personId) continue;
+    const roles = personRolesMap.get(user.personId) ?? new Set<UserRole>();
+    roles.add(normalizeUserRole(user.role));
+    personRolesMap.set(user.personId, roles);
+  }
+
+  const ownerTeam = personTeamMap.get(document.ownerId);
+  const ownerRoles = personRolesMap.get(document.ownerId);
+  const ownerIsLeaderCreator =
+    Boolean(ownerRoles?.has("leader")) &&
+    !Boolean(ownerRoles?.has("admin") || ownerRoles?.has("ceo"));
+  const visibility = document.visibility ?? "team";
+  const visibleToPersonIds = document.visibleToPersonIds ?? [];
+
+  const personIds = allUsers
+    .map(mapDbUser)
+    .filter((user) => Boolean(user.personId))
+    .filter((user) => {
+      const personId = user.personId!;
+      const person = personById.get(personId);
+      if (!person) return false;
+      if (isAdminLikeRole(user.role)) return true;
+
+      const isLeader = user.role === "leader";
+      const isVanHanhLeader = isLeader && person.team === "product";
+
+      if (ownerIsLeaderCreator) {
+        if (visibility === "specific") {
+          return (
+            document.ownerId === person.id ||
+            (person.team === ownerTeam && visibleToPersonIds.includes(person.id))
+          );
+        }
+        return person.team === ownerTeam || document.ownerId === person.id;
+      }
+
+      if (visibility === "team") {
+        return person.team === ownerTeam || document.ownerId === person.id;
+      }
+      if (visibility === "office") {
+        return person.team !== "store";
+      }
+      if (visibility === "store") {
+        return person.team === "store" || isVanHanhLeader;
+      }
+      return document.ownerId === person.id || isLeader || visibleToPersonIds.includes(person.id);
+    })
+    .map((user) => user.personId as string);
+
+  return {
+    personIds: Array.from(new Set(personIds)),
+    documentName: document.name,
+  };
+}
+
 async function getSessionActor(sessionUserId?: string | null): Promise<SessionActor | null> {
   if (!sessionUserId) {
     return null;

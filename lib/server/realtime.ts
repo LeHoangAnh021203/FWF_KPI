@@ -10,6 +10,7 @@ export type AppRealtimeEventType =
   | "directory.updated"
   | "workspace.updated"
   | "schedule.updated"
+  | "learning.updated"
   | "approval.updated";
 
 export type AppRealtimeEventAction =
@@ -25,6 +26,9 @@ export type AppRealtimeEntityType =
   | "task"
   | "project"
   | "schedule"
+  | "document"
+  | "quiz"
+  | "learning_progress"
   | "person"
   | "profile"
   | "approval";

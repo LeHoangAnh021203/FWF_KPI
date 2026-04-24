@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { submitQuizAttempt } from "@/lib/server/data";
+import { getAuthState, getDocumentRealtimeAudience, submitQuizAttempt } from "@/lib/server/data";
+import { publishAppEventToPersons } from "@/lib/server/realtime";
 import { getSessionUserId } from "@/lib/server/session";
 
 export async function POST(
@@ -11,6 +12,16 @@ export async function POST(
     const sessionUserId = await getSessionUserId();
     const body = await request.json() as { answers: number[]; startedAt: string };
     const result = await submitQuizAttempt(sessionUserId, documentId, body.answers, body.startedAt);
+    const [authState, audience] = await Promise.all([getAuthState(sessionUserId), getDocumentRealtimeAudience(documentId)]);
+    void publishAppEventToPersons(audience.personIds, {
+      type: "learning.updated",
+      actorId: authState.user?.personId ?? result.personId,
+      action: "updated",
+      entityType: "learning_progress",
+      entityLabel: audience.documentName,
+      entityId: result.id,
+      occurredAt: new Date().toISOString()
+    });
     return NextResponse.json({ ok: true, result });
   } catch (error) {
     const msg = error instanceof Error ? error.message : "Failed";

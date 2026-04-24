@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getMyLearningProgress, upsertMyLearningProgress } from "@/lib/server/data";
+import { getAuthState, getDocumentRealtimeAudience, getMyLearningProgress, upsertMyLearningProgress } from "@/lib/server/data";
+import { publishAppEventToPersons } from "@/lib/server/realtime";
 import { getSessionUserId } from "@/lib/server/session";
 
 export async function GET() {
@@ -33,6 +34,18 @@ export async function PUT(request: Request) {
     }
 
     const progress = await upsertMyLearningProgress(sessionUserId, body);
+    if (body.completedAt) {
+      const [authState, audience] = await Promise.all([getAuthState(sessionUserId), getDocumentRealtimeAudience(body.documentId)]);
+      void publishAppEventToPersons(audience.personIds, {
+        type: "learning.updated",
+        actorId: authState.user?.personId ?? "system",
+        action: "updated",
+        entityType: "learning_progress",
+        entityLabel: audience.documentName,
+        entityId: body.documentId,
+        occurredAt: new Date().toISOString()
+      });
+    }
     return NextResponse.json({ ok: true, progress });
   } catch (error) {
     const msg = error instanceof Error ? error.message : "Failed";
@@ -42,4 +55,3 @@ export async function PUT(request: Request) {
     );
   }
 }
-

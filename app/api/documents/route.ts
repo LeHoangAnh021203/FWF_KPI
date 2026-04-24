@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { createDocumentRecord, getDocumentsData } from "@/lib/server/data";
+import { createDocumentRecord, getAuthState, getDocumentRealtimeAudience, getDocumentsData } from "@/lib/server/data";
+import { publishAppEventToPersons } from "@/lib/server/realtime";
 import { getSessionUserId } from "@/lib/server/session";
 
 export async function GET(request: Request) {
@@ -15,6 +16,16 @@ export async function POST(request: Request) {
     const sessionUserId = await getSessionUserId();
     const body = await request.json();
     const document = await createDocumentRecord(sessionUserId, body);
+    const [authState, audience] = await Promise.all([getAuthState(sessionUserId), getDocumentRealtimeAudience(document.id)]);
+    void publishAppEventToPersons(audience.personIds, {
+      type: "learning.updated",
+      actorId: authState.user?.personId ?? document.ownerId,
+      action: "created",
+      entityType: "document",
+      entityLabel: audience.documentName,
+      entityId: document.id,
+      occurredAt: new Date().toISOString()
+    });
     return NextResponse.json({ ok: true, document });
   } catch (error) {
     return NextResponse.json(

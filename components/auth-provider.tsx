@@ -124,6 +124,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           return { ok: false, message: payload.message ?? "Đăng nhập thất bại." };
         }
 
+        clearAppBootstrapCache();
         setUser(payload.user);
         return { ok: true };
       },
@@ -159,6 +160,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           return { ok: true, message: payload.message, requiresApproval: payload.requiresApproval };
         }
 
+        clearAppBootstrapCache();
         setUser(payload.user);
         setUsers((prevUsers) => {
           if (prevUsers.some((item) => item.id === payload.user?.id)) {
