@@ -2,9 +2,10 @@
 
 import type React from "react"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useCallback } from "react"
 import { useDirectory } from "@/components/directory-provider"
 import { useAuth } from "@/components/auth-provider"
+import { subscribeToPersonChannel } from "@/lib/client/realtime"
 import { toast } from "@/components/ui/use-toast"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -15,6 +16,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { documentTypes, formatFileSize, formatDate, type Document, type Folder } from "@/lib/documents"
 import type { UserAccount } from "@/lib/auth"
+import { useIsMobile } from "@/components/hooks/use-mobile"
 import {
     Search,
     Filter,
@@ -51,6 +53,8 @@ import {
     Pencil,
     Users,
     GraduationCap,
+    AlertTriangle,
+    Maximize,
 } from "lucide-react"
 
 type LearningQuizQuestion = {
@@ -104,6 +108,8 @@ interface QuizCreateState {
     durationMinutes: string
     questions: QuizCreateQuestion[]
     isNewDocument?: boolean
+    isGenerating?: boolean
+    autoQuestionCount?: string
 }
 
 interface QuizTakeState {
@@ -117,6 +123,10 @@ interface QuizTakeState {
     isSubmitting: boolean
     isSubmitted: boolean
     result: QuizAttemptRecord | null
+    violationCount: number
+    lastViolationReason: string
+    questionOrder: number[]
+    optionOrderByQuestion: number[][]
 }
 
 interface QuizResultsState {
@@ -135,6 +145,17 @@ type LearningStatusRow = {
     personName: string
     team: string
     status: LearningStatusType
+}
+
+function shuffleIndices(length: number) {
+    const indices = Array.from({ length }, (_, index) => index)
+    for (let i = indices.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1))
+        const temp = indices[i]!
+        indices[i] = indices[j]!
+        indices[j] = temp
+    }
+    return indices
 }
 
 type LearningProgressRecord = {
@@ -230,6 +251,7 @@ function buildDefaultVisibilityDialog(user: UserAccount | null): VisibilityDialo
 export default function DocumentsPage() {
     const { people } = useDirectory()
     const { user } = useAuth()
+    const isMobile = useIsMobile()
     const isLeaderOrAdmin = user?.role === "leader" || user?.role === "admin" || user?.role === "ceo"
 
     const [searchQuery, setSearchQuery] = useState("")
@@ -268,6 +290,10 @@ export default function DocumentsPage() {
         open: false, quiz: null, documentId: "", answers: [],
         currentQuestion: 0, startedAt: "", timeLeftSeconds: 0,
         isSubmitting: false, isSubmitted: false, result: null,
+        violationCount: 0,
+        lastViolationReason: "",
+        questionOrder: [],
+        optionOrderByQuestion: [],
     })
 
     const [quizCreateDialog, setQuizCreateDialog] = useState<QuizCreateState>(defaultQuizCreate())
@@ -287,6 +313,9 @@ export default function DocumentsPage() {
     const contextMenuRef = useRef<HTMLDivElement>(null)
     const quizTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
     const learningTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+    const quizTakeModalRef = useRef<QuizTakeState>(defaultQuizTake())
+    const quizViolationsRef = useRef(0)
+    const MAX_QUIZ_VIOLATIONS = 3
 
     const activeFolder = folders.find((f) => f.id === activeFolderId) ?? null
     const currentPerson = people.find((person) => person.id === user?.personId) ?? null
@@ -429,10 +458,13 @@ export default function DocumentsPage() {
                 ? `/api/documents?folderId=${activeFolderId}`
                 : "/api/documents"
             const res = await fetch(url, { credentials: "include", cache: "no-store" })
-            if (!res.ok) return
+            if (!res.ok) return []
             const payload = (await res.json()) as { documents: Document[] }
             setDocumentsData(payload.documents)
-        } catch { /* ignore */ }
+            return payload.documents
+        } catch {
+            return []
+        }
     }
 
     const patchDocument = async (documentId: string, updates: Partial<Document>) => {
@@ -612,9 +644,32 @@ export default function DocumentsPage() {
         setIsDrawerOpen(true)
     }
 
+    const estimateContextMenuHeight = (doc: Document) => {
+        let height = 44 /* detail */ + 44 /* star */
+        if (doc.type === "link" && doc.url) height += 44
+        if (isLeaderOrAdmin) {
+            height += 44 /* visibility */
+            height += 12 /* separator */
+            height += 44 /* rename */
+            height += 44 /* move */
+            height += 44 /* learning toggle */
+            height += 12 /* separator */
+            height += 44 /* delete */
+        }
+        return height + 12 /* vertical padding */
+    }
+
     const handleContextMenu = (e: React.MouseEvent, doc: Document) => {
         e.preventDefault()
-        setContextMenu({ document: doc, position: { x: e.clientX, y: e.clientY } })
+        const menuWidth = 220
+        const menuHeight = estimateContextMenuHeight(doc)
+        const padding = 12
+        const viewportWidth = window.visualViewport?.width ?? window.innerWidth
+        const viewportHeight = window.visualViewport?.height ?? window.innerHeight
+        const safeBottom = isMobile ? 76 : padding
+        const x = Math.max(padding, Math.min(e.clientX, viewportWidth - menuWidth - padding))
+        const y = Math.max(padding, Math.min(e.clientY, viewportHeight - menuHeight - safeBottom))
+        setContextMenu({ document: doc, position: { x, y } })
     }
 
     const handleStarToggle = async (docId: string) => {
@@ -919,6 +974,40 @@ export default function DocumentsPage() {
         setLearningDataLoaded(true)
     }
 
+    const refreshLearningRealtimeData = useCallback(async () => {
+        await loadFolders()
+        const docs = await loadDocuments()
+        if (activeTab !== "learning") return
+
+        const learningDocs = isLeaderOrAdmin
+            ? docs.filter((d) => d.isLearningMaterial)
+            : docs
+        if (learningDocs.length > 0 && !selectedLearningDoc) {
+            setSelectedLearningDoc(learningDocs[0] ?? null)
+        }
+        if (selectedLearningDoc && !learningDocs.some((doc) => doc.id === selectedLearningDoc.id)) {
+            setSelectedLearningDoc(learningDocs[0] ?? null)
+        }
+        await loadLearningData(learningDocs)
+    }, [activeFolderId, activeTab, isLeaderOrAdmin, selectedLearningDoc])
+
+    useEffect(() => {
+        if (!user?.personId) {
+            return
+        }
+
+        return subscribeToPersonChannel(user.personId, (message) => {
+            const payload = message.data as { type?: string } | undefined
+            if (payload?.type !== "learning.updated") {
+                return
+            }
+
+            void refreshLearningRealtimeData().catch(() => {
+                // Ignore transient realtime refresh failures.
+            })
+        })
+    }, [refreshLearningRealtimeData, user?.personId])
+
     const handleEnterLearningTab = () => {
         setActiveTab("learning")
         const docs = isLeaderOrAdmin
@@ -1066,9 +1155,9 @@ export default function DocumentsPage() {
     }
 
     const handleSaveQuiz = async () => {
-        const { documentId: currentDocId, existingQuizId, title, description, durationMinutes, questions, isNewDocument, documentName } = quizCreateDialog
-        if (isNewDocument && !documentName.trim()) { toast({ title: "Cần nhập tên bài kiểm tra", variant: "destructive" }); return }
-        if (!title.trim()) { toast({ title: "Cần nhập tiêu đề quiz", variant: "destructive" }); return }
+        const { documentId: currentDocId, existingQuizId, title, description, durationMinutes, questions, isNewDocument } = quizCreateDialog
+        const normalizedTitle = title.trim()
+        if (!normalizedTitle) { toast({ title: "Cần nhập tên bài kiểm tra", variant: "destructive" }); return }
         if (questions.some((q) => !q.text.trim() || q.options.some((o) => !o.trim()))) {
             toast({ title: "Cần nhập đầy đủ câu hỏi và 4 đáp án", variant: "destructive" }); return
         }
@@ -1083,7 +1172,7 @@ export default function DocumentsPage() {
                     headers: { "Content-Type": "application/json" },
                     credentials: "include",
                     body: JSON.stringify({
-                        name: documentName.trim(),
+                        name: normalizedTitle,
                         type: "txt",
                         size: 0,
                         tags: ["learning"],
@@ -1104,7 +1193,7 @@ export default function DocumentsPage() {
             }
 
             const payload = {
-                title: title.trim(),
+                title: normalizedTitle,
                 description: description.trim(),
                 durationMinutes: Number(durationMinutes) || 15,
                 questions,
@@ -1125,6 +1214,53 @@ export default function DocumentsPage() {
             toast({ title: err instanceof Error ? err.message : "Không thể lưu quiz", variant: "destructive" })
         } finally {
             setIsSubmitting(false)
+        }
+    }
+
+    const handleAutoGenerateQuiz = async () => {
+        const { documentId, autoQuestionCount } = quizCreateDialog
+        const targetDoc = documentsData.find((doc) => doc.id === documentId)
+        const isAutoSupportedFormat = targetDoc?.type === "pdf" || targetDoc?.type === "pptx"
+        if (!targetDoc || !isAutoSupportedFormat) {
+            toast({
+                title: "Định dạng này chưa hỗ trợ tạo tự động. Vui lòng tạo câu hỏi thủ công.",
+                variant: "destructive",
+            })
+            return
+        }
+        const count = Math.min(Math.max(Number(autoQuestionCount) || 5, 1), 30)
+        setQuizCreateDialog((s) => ({ ...s, isGenerating: true }))
+        try {
+            const res = await fetch(`/api/learning/quiz/${documentId}/generate`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({ questionCount: count }),
+            })
+            const data = (await res.json()) as {
+                ok: boolean
+                questions?: QuizCreateQuestion[]
+                documentName?: string
+                message?: string
+                fallback?: boolean
+                warning?: string
+            }
+            if (!res.ok || !data.ok) throw new Error(data.message ?? "Lỗi tạo câu hỏi")
+            setQuizCreateDialog((s) => ({
+                ...s,
+                questions: data.questions!,
+                ...(s.title === "" && data.documentName ? { title: `Kiểm tra: ${data.documentName}` } : {}),
+            }))
+            toast({
+                title: data.fallback
+                    ? `Đã tạo ${data.questions!.length} câu hỏi nháp`
+                    : `Đã tạo ${data.questions!.length} câu hỏi tự động`,
+                description: data.warning,
+            })
+        } catch (err) {
+            toast({ title: err instanceof Error ? err.message : "Không thể tạo câu hỏi", variant: "destructive" })
+        } finally {
+            setQuizCreateDialog((s) => ({ ...s, isGenerating: false }))
         }
     }
 
@@ -1149,13 +1285,8 @@ export default function DocumentsPage() {
     const handleOpenQuizTake = (doc: Document) => {
         const quiz = quizzes[doc.id]
         if (!quiz) return
-        if (!isLeaderOrAdmin && completedLearningCount < learningDocs.length) {
-            toast({
-                title: "Bạn cần hoàn thành toàn bộ khóa học trước khi làm bài test.",
-                variant: "destructive",
-            })
-            return
-        }
+        const questionOrder = shuffleIndices(quiz.questions.length)
+        const optionOrderByQuestion = quiz.questions.map((question) => shuffleIndices(question.options.length))
         const startedAt = new Date().toISOString()
         setQuizTakeModal({
             open: true,
@@ -1168,6 +1299,10 @@ export default function DocumentsPage() {
             isSubmitting: false,
             isSubmitted: false,
             result: null,
+            violationCount: 0,
+            lastViolationReason: "",
+            questionOrder,
+            optionOrderByQuestion,
         })
     }
 
@@ -1190,12 +1325,76 @@ export default function DocumentsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [quizTakeModal.open, quizTakeModal.isSubmitted])
 
+    // Keep ref in sync so anti-cheat handlers always read latest answers
+    useEffect(() => { quizTakeModalRef.current = quizTakeModal }, [quizTakeModal])
+
+    // Anti-cheat: fullscreen + tab/app-switch detection
+    useEffect(() => {
+        if (!quizTakeModal.open || quizTakeModal.isSubmitted) {
+            if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined)
+            quizViolationsRef.current = 0
+            return
+        }
+
+        if (!document.fullscreenElement) {
+            void document.documentElement.requestFullscreen().catch(() => undefined)
+        }
+
+        const warn = (reason: string) => {
+            quizViolationsRef.current += 1
+            const count = quizViolationsRef.current
+            setQuizTakeModal((prev) => ({ ...prev, violationCount: count, lastViolationReason: reason }))
+            if (count >= MAX_QUIZ_VIOLATIONS) {
+                toast({ title: "Vi phạm quá nhiều lần – Bài thi tự động nộp!", variant: "destructive" })
+                void handleSubmitQuiz(true)
+            } else {
+                toast({
+                    title: `Cảnh báo gian lận: ${reason}`,
+                    description: `Vi phạm lần ${count}/${MAX_QUIZ_VIOLATIONS}. Vượt quá giới hạn sẽ tự động nộp bài.`,
+                    variant: "destructive",
+                })
+            }
+        }
+
+        const onVisibility = () => { if (document.hidden) warn("Bạn đã chuyển tab hoặc rời khỏi trang thi") }
+        const onBlur = () => { if (!document.hidden) warn("Bạn đã chuyển sang ứng dụng khác") }
+        const onBeforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = "" }
+        const onFullscreenChange = () => {
+            if (!document.fullscreenElement && !quizTakeModalRef.current.isSubmitted) {
+                void document.documentElement.requestFullscreen().catch(() => undefined)
+                warn("Bạn đã thoát chế độ toàn màn hình")
+            }
+        }
+        const onKeyDown = (e: KeyboardEvent) => {
+            const key = e.key.toLowerCase()
+            if ((e.ctrlKey || e.metaKey) && ["tab", "t", "n", "w", "l", "r"].includes(key)) {
+                e.preventDefault()
+                warn(`Bạn vừa dùng phím tắt bị chặn (Ctrl/Cmd + ${e.key.toUpperCase()})`)
+            }
+        }
+
+        document.addEventListener("visibilitychange", onVisibility)
+        window.addEventListener("blur", onBlur)
+        window.addEventListener("beforeunload", onBeforeUnload)
+        document.addEventListener("fullscreenchange", onFullscreenChange)
+        window.addEventListener("keydown", onKeyDown)
+
+        return () => {
+            document.removeEventListener("visibilitychange", onVisibility)
+            window.removeEventListener("blur", onBlur)
+            window.removeEventListener("beforeunload", onBeforeUnload)
+            document.removeEventListener("fullscreenchange", onFullscreenChange)
+            window.removeEventListener("keydown", onKeyDown)
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [quizTakeModal.open, quizTakeModal.isSubmitted])
+
     const handleSubmitQuiz = async (autoSubmit = false) => {
         if (!autoSubmit && !confirm("Nộp bài? Bạn sẽ không thể làm lại.")) return
         if (quizTimerRef.current) clearInterval(quizTimerRef.current)
         setQuizTakeModal((prev) => ({ ...prev, isSubmitting: true }))
         try {
-            const { documentId, answers, startedAt } = quizTakeModal
+            const { documentId, answers, startedAt } = quizTakeModalRef.current
             const res = await fetch(`/api/learning/quiz/${documentId}/submit`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -1290,7 +1489,7 @@ export default function DocumentsPage() {
                                 <span>{docType.icon}</span>
                             )}
                         </div>
-                        <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div className="flex items-center space-x-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
                             <Button variant="ghost" size="icon" className="h-6 w-6"
                                 onClick={(e) => { e.stopPropagation(); void handleStarToggle(doc.id) }}>
                                 {doc.isStarred
@@ -1368,7 +1567,7 @@ export default function DocumentsPage() {
                         <h3 className="font-medium text-gray-900 dark:text-white truncate">{doc.name}</h3>
                         {doc.isStarred && <Star className="w-4 h-4 text-yellow-500 fill-current flex-shrink-0" />}
                     </div>
-                    <div className="flex items-center space-x-4 text-sm text-gray-500 dark:text-gray-400 mt-1">
+                    <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-500 dark:text-gray-400">
                         <span>{formatFileSize(doc.size)}</span>
                         <span>{formatDate(doc.modifiedAt)}</span>
                         <VisibilityBadge doc={doc} />
@@ -1395,7 +1594,7 @@ export default function DocumentsPage() {
                         </AvatarFallback>
                     </Avatar>
                     <span className="text-sm text-gray-600 dark:text-gray-300 hidden sm:block">{owner?.name || "Unknown"}</span>
-                    <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100"
+                    <Button variant="ghost" size="icon" className="h-6 w-6 opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
                         onClick={(e) => handleContextMenu(e, doc)}>
                         <MoreHorizontal className="w-4 h-4" />
                     </Button>
@@ -1520,20 +1719,23 @@ export default function DocumentsPage() {
     }
 
     // ── Render ───────────────────────────────────────────────────────
+    const quizCreateTargetDoc = documentsData.find((doc) => doc.id === quizCreateDialog.documentId)
+    const quizCreateDocType = quizCreateTargetDoc?.type
+    const canAutoGenerateByFormat = quizCreateDocType === "pdf" || quizCreateDocType === "pptx"
 
     return (
-        <div className="p-6">
+        <div className="p-3 sm:p-4 lg:p-6">
             {/* Header */}
-            <div className="mb-4">
+            <div className="mb-4 sm:mb-5">
                 <h1 className="text-2xl font-bold text-gray-900 dark:text-white mb-1">Documents</h1>
                 <p className="text-gray-600 dark:text-gray-400 text-sm">Quản lý và tổ chức tài liệu của phòng ban</p>
             </div>
 
             {/* ── Tab bar ── */}
-            <div className="flex gap-1 mb-6 bg-gray-100 dark:bg-gray-800 rounded-xl p-1 w-fit">
+            <div className="mb-5 flex w-full gap-1 overflow-x-auto rounded-xl bg-gray-100 p-1 dark:bg-gray-800 sm:mb-6 sm:w-fit">
                 <button
                     onClick={() => setActiveTab("all")}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                    className={`flex items-center gap-2 whitespace-nowrap px-4 py-2 rounded-lg text-sm font-medium transition-all ${
                         activeTab === "all"
                             ? "bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm"
                             : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
@@ -1544,7 +1746,7 @@ export default function DocumentsPage() {
                 </button>
                 <button
                     onClick={handleEnterLearningTab}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                    className={`flex items-center gap-2 whitespace-nowrap px-4 py-2 rounded-lg text-sm font-medium transition-all ${
                         activeTab === "learning"
                             ? "bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm"
                             : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
@@ -1576,11 +1778,11 @@ export default function DocumentsPage() {
                     </div>
                 ) : (
                     <div
-                        className="flex rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden bg-white dark:bg-gray-900"
-                        style={{ minHeight: "calc(100vh - 220px)" }}
+                        className="flex flex-col overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900 lg:flex-row"
+                        style={{ minHeight: isMobile ? "auto" : "calc(100vh - 220px)" }}
                     >
                         {/* ── Left Sidebar ─────────────────────────────────── */}
-                        <div className="w-72 xl:w-80 border-r border-gray-200 dark:border-gray-800 flex flex-col flex-shrink-0">
+                        <div className="w-full flex-shrink-0 border-b border-gray-200 dark:border-gray-800 lg:w-72 lg:border-b-0 lg:border-r xl:w-80">
                             {/* Sidebar header */}
                             <div className="px-5 py-4 border-b border-gray-200 dark:border-gray-800">
                                 <div className="flex items-center justify-between mb-1">
@@ -1618,7 +1820,7 @@ export default function DocumentsPage() {
                             </div>
 
                             {/* Doc list */}
-                            <div className="overflow-y-auto flex-1">
+                            <div className="max-h-[42vh] overflow-y-auto lg:max-h-none lg:flex-1">
                                 {learningDocs.map((doc) => {
                                     const quiz = quizzes[doc.id]
                                     const attempt = myAttempts[doc.id]
@@ -1698,7 +1900,6 @@ export default function DocumentsPage() {
                                     ? Math.max(activePlanStep?.estimatedSeconds ?? 0, Math.ceil(planVideoProgress?.duration ?? 0), 1)
                                     : Math.ceil(directVideoProgress?.duration ?? 0) || LEARNING_REQUIRED_SECONDS
                                 const isCurrentLessonCompleted = isLeaderOrAdmin || learningProgress.completedDocIds.includes(doc.id)
-                                const isCourseCompleted = isLeaderOrAdmin || completedLearningCount >= learningDocs.length
                                 const canGoNext = !!nextDoc
                                 const prevPlanStep = hasLearningPlan && activePlanStepIndex > 0
                                     ? learningPlanSteps[activePlanStepIndex - 1] ?? null
@@ -1713,7 +1914,7 @@ export default function DocumentsPage() {
                                     : false
 
                                 return (
-                                    <div className="max-w-3xl mx-auto px-6 py-8 space-y-5">
+                                    <div className="mx-auto max-w-3xl space-y-4 px-3 py-4 sm:space-y-5 sm:px-5 sm:py-6 lg:px-6 lg:py-8">
                                         {/* Document viewer card */}
                                         <div className="bg-white dark:bg-gray-900 rounded-2xl overflow-hidden shadow-sm border border-gray-200 dark:border-gray-800">
                                             {/* Preview area */}
@@ -1731,18 +1932,41 @@ export default function DocumentsPage() {
                                                         </span>
                                                     </div>
 
-                                                    {doc.learningPlan?.sourceType === "pdf" && doc.url && activePlanStep.pageNumber ? (
-                                                        <div className="relative aspect-video rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 bg-white">
-                                                            <iframe
-                                                                key={`${doc.id}-${activePlanStep.id}`}
-                                                                title={`${doc.name}-page-${activePlanStep.pageNumber}`}
-                                                                src={`${doc.url}?step=${activePlanStep.id}#page=${activePlanStep.pageNumber}&view=FitH&zoom=page-fit&toolbar=0&navpanes=0&scrollbar=0&statusbar=0&messages=0`}
-                                                                className="block h-full w-[calc(100%+18px)] -mr-[18px] pointer-events-none select-none"
-                                                                scrolling="no"
-                                                            />
-                                                            <div className="absolute inset-0" aria-hidden="true" />
+                                                    {(() => {
+                                                        const previewUrl = doc.learningPlan?.sourceType === "pdf"
+                                                            ? doc.url
+                                                            : doc.learningPlan?.previewUrl
+                                                        if (previewUrl && activePlanStep.pageNumber) {
+                                                            return (
+                                                                <div className="relative aspect-video rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 bg-white">
+                                                                    <iframe
+                                                                        key={`${doc.id}-${activePlanStep.id}`}
+                                                                        title={`${doc.name}-page-${activePlanStep.pageNumber}`}
+                                                                        src={`${previewUrl}?step=${activePlanStep.id}#page=${activePlanStep.pageNumber}&view=FitH&zoom=page-fit&toolbar=0&navpanes=0&scrollbar=0&statusbar=0&messages=0`}
+                                                                        className="block h-full w-[calc(100%+18px)] -mr-[18px] pointer-events-none select-none"
+                                                                        scrolling="no"
+                                                                    />
+                                                                    <div className="absolute inset-0" aria-hidden="true" />
+                                                                </div>
+                                                            )
+                                                        }
+                                                        return null
+                                                    })() ?? (
+                                                        doc.learningPlan?.sourceType === "pptx" && activePlanStep.content?.trim() ? (
+                                                        <div className="aspect-video rounded-xl border border-gray-200 dark:border-gray-700 bg-white/90 dark:bg-gray-900/70 p-5 overflow-y-auto">
+                                                            <div className="space-y-3">
+                                                                {activePlanStep.content
+                                                                    .split("\n")
+                                                                    .map((line) => line.trim())
+                                                                    .filter(Boolean)
+                                                                    .map((line, index) => (
+                                                                        <p key={`${activePlanStep.id}-line-${index}`} className="text-sm leading-6 text-gray-700 dark:text-gray-200">
+                                                                            {line}
+                                                                        </p>
+                                                                    ))}
+                                                            </div>
                                                         </div>
-                                                    ) : (
+                                                        ) : (
                                                         <div className="aspect-video rounded-xl border border-gray-200 dark:border-gray-700 bg-white/70 dark:bg-gray-800/60 grid place-items-center">
                                                             <div className="text-center px-4">
                                                                 <BookOpen className="w-12 h-12 mx-auto text-violet-400 mb-3" />
@@ -1754,6 +1978,7 @@ export default function DocumentsPage() {
                                                                 </p>
                                                             </div>
                                                         </div>
+                                                        )
                                                     )}
 
                                                     {activePlanStep.media && activePlanStep.media.length > 0 && (
@@ -1908,14 +2133,14 @@ export default function DocumentsPage() {
 
                                             {/* Doc info */}
                                             <div className="p-6">
-                                                <div className="flex items-start justify-between gap-4">
+                                                <div className="flex flex-wrap items-start justify-between gap-3 sm:gap-4">
                                                     <div className="flex-1 min-w-0">
                                                         <h1 className="text-xl font-bold text-gray-900 dark:text-white leading-snug">{doc.name}</h1>
                                                         {doc.description && (
                                                             <p className="text-sm text-gray-500 dark:text-gray-400 mt-1.5">{doc.description}</p>
                                                         )}
                                                     </div>
-                                                    <div className="flex items-center gap-2 flex-shrink-0">
+                                                    <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap sm:justify-end">
                                                         {doc.url && isLeaderOrAdmin && (
                                                             <Button size="sm" variant="outline" className="bg-transparent"
                                                                 onClick={() => window.open(doc.url, "_blank")}>
@@ -2008,7 +2233,7 @@ export default function DocumentsPage() {
                                                     {quiz.description && (
                                                         <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">{quiz.description}</p>
                                                     )}
-                                                    <div className="flex items-center gap-5 text-sm text-gray-500 dark:text-gray-400 mb-6">
+                                                    <div className="mb-6 flex flex-wrap items-center gap-3 text-sm text-gray-500 dark:text-gray-400 sm:gap-5">
                                                         <span className="flex items-center gap-1.5"><ClipboardCheck className="w-4 h-4 text-violet-400" />{quiz.questions.length} câu hỏi</span>
                                                         <span className="flex items-center gap-1.5"><Timer className="w-4 h-4 text-violet-400" />{quiz.durationMinutes} phút</span>
                                                     </div>
@@ -2016,7 +2241,7 @@ export default function DocumentsPage() {
                                                     {!isLeaderOrAdmin && (
                                                         attempt ? (
                                                             <div className="space-y-4">
-                                                                <div className={`flex items-center gap-5 p-5 rounded-xl ${attempt.score >= 80 ? "bg-green-50 dark:bg-green-900/20" : attempt.score >= 50 ? "bg-amber-50 dark:bg-amber-900/20" : "bg-red-50 dark:bg-red-900/20"}`}>
+                                                                <div className={`flex items-start gap-4 rounded-xl p-4 sm:items-center sm:gap-5 sm:p-5 ${attempt.score >= 80 ? "bg-green-50 dark:bg-green-900/20" : attempt.score >= 50 ? "bg-amber-50 dark:bg-amber-900/20" : "bg-red-50 dark:bg-red-900/20"}`}>
                                                                     <Trophy className={`w-9 h-9 flex-shrink-0 ${attempt.score >= 80 ? "text-green-500" : attempt.score >= 50 ? "text-amber-500" : "text-red-500"}`} />
                                                                     <div>
                                                                         <p className="text-3xl font-bold text-gray-900 dark:text-white">
@@ -2036,22 +2261,16 @@ export default function DocumentsPage() {
                                                             <div className="space-y-3">
                                                                 <Button
                                                                     className="bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-60"
-                                                                    disabled={!isCourseCompleted}
                                                                     onClick={() => handleOpenQuizTake(doc)}
                                                                 >
                                                                     <ClipboardCheck className="w-4 h-4 mr-2" />Bắt đầu kiểm tra
                                                                 </Button>
-                                                                {!isCourseCompleted && (
-                                                                    <p className="text-sm text-amber-600 dark:text-amber-400">
-                                                                        Bạn cần hoàn thành toàn bộ khóa học trước khi làm bài kiểm tra.
-                                                                    </p>
-                                                                )}
                                                             </div>
                                                         )
                                                     )}
 
                                                     {isLeaderOrAdmin && (
-                                                        <div className="flex gap-3">
+                                                        <div className="flex flex-col gap-3 sm:flex-row">
                                                             <Button variant="outline" className="bg-transparent"
                                                                 onClick={() => handleOpenQuizCreate(doc)}>
                                                                 <Pencil className="w-4 h-4 mr-2" />Sửa quiz
@@ -2065,7 +2284,7 @@ export default function DocumentsPage() {
                                                 </div>
                                             </div>
                                         ) : isLeaderOrAdmin ? (
-                                            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-dashed border-gray-300 dark:border-gray-700 p-10 text-center">
+                                            <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-6 text-center dark:border-gray-700 dark:bg-gray-900 sm:p-10">
                                                 <ClipboardCheck className="w-10 h-10 mx-auto mb-3 text-gray-300 dark:text-gray-600" />
                                                 <p className="text-sm font-medium text-gray-600 dark:text-gray-400 mb-4">Chưa có bài kiểm tra cho tài liệu này</p>
                                                 <Button size="sm" onClick={() => handleOpenQuizCreate(doc)}>
@@ -2073,14 +2292,14 @@ export default function DocumentsPage() {
                                                 </Button>
                                             </div>
                                         ) : (
-                                            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-10 text-center">
+                                            <div className="rounded-2xl border border-gray-200 bg-white p-6 text-center dark:border-gray-800 dark:bg-gray-900 sm:p-10">
                                                 <ClipboardCheck className="w-10 h-10 mx-auto mb-3 text-gray-300 dark:text-gray-600" />
                                                 <p className="text-sm text-gray-500 dark:text-gray-400">Chưa có bài kiểm tra cho tài liệu này.</p>
                                             </div>
                                         )}
 
                                         {/* Navigation */}
-                                        <div className="flex items-center justify-between pt-2 pb-4">
+                                        <div className="flex items-center justify-between gap-2 pt-2 pb-4">
                                             <Button
                                                 variant="outline"
                                                 className={`bg-transparent ${!prevDoc ? "invisible" : ""}`}
@@ -2159,7 +2378,7 @@ export default function DocumentsPage() {
                                 <span className="text-sm font-medium">{folder.name}</span>
                                 {isLeaderOrAdmin && (
                                     <button
-                                        className="ml-1 opacity-0 group-hover:opacity-100 transition-opacity text-gray-400 hover:text-red-500"
+                                        className="ml-1 text-gray-400 transition-opacity hover:text-red-500 opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
                                         onClick={(e) => { e.stopPropagation(); void handleDeleteFolder(folder.id) }}
                                     >
                                         <X className="w-3 h-3" />
@@ -2173,7 +2392,7 @@ export default function DocumentsPage() {
 
             {/* Active folder bar */}
             {activeFolderId && (
-                <div className="flex items-center gap-2 mb-4 px-3 py-2 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-700">
+                <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 dark:border-blue-700 dark:bg-blue-900/20">
                     <Button
                         variant="ghost"
                         size="sm"
@@ -2187,7 +2406,7 @@ export default function DocumentsPage() {
 
                     {/* Actions inside folder — leader/admin only */}
                     {isLeaderOrAdmin && (
-                        <div className="ml-auto flex gap-2">
+                        <div className="ml-auto flex w-full justify-end gap-2 sm:w-auto">
                             <Button size="sm" variant="outline"
                                 className="border-blue-300 text-blue-700 dark:text-blue-300 bg-transparent"
                                 onClick={openCreateDocumentDialog}>
@@ -2200,7 +2419,7 @@ export default function DocumentsPage() {
             )}
 
             {/* Controls */}
-            <div className="flex flex-col sm:flex-row gap-4 mb-6">
+            <div className="mb-6 flex flex-col gap-4 sm:flex-row">
                 <div className="flex-1">
                     <div className="relative">
                         <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-4 h-4" />
@@ -2213,11 +2432,11 @@ export default function DocumentsPage() {
                     </div>
                 </div>
 
-                <div className="flex items-center space-x-2">
+                <div className="flex flex-wrap items-center gap-2">
                     <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                             <Button variant="outline" className="bg-transparent">
-                                Sort: {sortBy.charAt(0).toUpperCase() + sortBy.slice(1)}
+                                {isMobile ? "Sort" : `Sort: ${sortBy.charAt(0).toUpperCase() + sortBy.slice(1)}`}
                                 <ChevronDown className="w-4 h-4 ml-2" />
                             </Button>
                         </DropdownMenuTrigger>
@@ -2234,7 +2453,7 @@ export default function DocumentsPage() {
                         <DropdownMenuTrigger asChild>
                             <Button variant="outline" className="bg-transparent">
                                 <Filter className="w-4 h-4 mr-2" />
-                                Group: {groupBy === "none" ? "None" : groupBy.charAt(0).toUpperCase() + groupBy.slice(1)}
+                                {isMobile ? "Group" : `Group: ${groupBy === "none" ? "None" : groupBy.charAt(0).toUpperCase() + groupBy.slice(1)}`}
                                 <ChevronDown className="w-4 h-4 ml-2" />
                             </Button>
                         </DropdownMenuTrigger>
@@ -2311,7 +2530,7 @@ export default function DocumentsPage() {
             {contextMenu && (
                 <div
                     ref={contextMenuRef}
-                    className="fixed z-50 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-2 min-w-[180px]"
+                    className="fixed z-50 min-w-[180px] max-w-[calc(100vw-24px)] max-h-[calc(100dvh-90px)] overflow-y-auto rounded-lg border border-gray-200 bg-white py-2 shadow-lg dark:border-gray-700 dark:bg-gray-800"
                     style={{ left: contextMenu.position.x, top: contextMenu.position.y }}
                 >
                     <button className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
@@ -2371,7 +2590,7 @@ export default function DocumentsPage() {
 
             {/* ── Document Details Drawer ──────────────────────────────── */}
             <Sheet open={isDrawerOpen} onOpenChange={setIsDrawerOpen}>
-                <SheetContent className="w-[400px] sm:w-[540px] bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700">
+                <SheetContent className="w-full max-w-full overflow-y-auto bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 sm:w-[540px]">
                     <SheetHeader>
                         <SheetTitle className="text-gray-900 dark:text-white">Chi tiết tài liệu</SheetTitle>
                     </SheetHeader>
@@ -2529,8 +2748,8 @@ export default function DocumentsPage() {
 
             {/* ── New Folder Dialog ────────────────────────────────────── */}
             {newFolderDialog.open && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-                    <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 w-full max-w-sm shadow-xl">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3">
+                    <div className="w-full max-w-sm rounded-2xl bg-white p-4 shadow-xl dark:bg-gray-800 sm:p-6">
                         <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Tạo folder mới</h2>
                         <Input
                             autoFocus
@@ -2552,8 +2771,8 @@ export default function DocumentsPage() {
 
             {/* ── Create Document Dialog ──────────────────────────────── */}
             {createDocumentDialog.open && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-                    <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 w-full max-w-md shadow-xl space-y-4">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3">
+                    <div className="w-full max-w-md max-h-[calc(100dvh-1.5rem)] overflow-y-auto rounded-2xl bg-white p-4 shadow-xl dark:bg-gray-800 space-y-4 sm:p-6">
                         <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Tạo tài liệu</h2>
 
                         <div className="space-y-3">
@@ -2664,8 +2883,8 @@ export default function DocumentsPage() {
 
             {/* ── Visibility Dialog ────────────────────────────────────── */}
             {visibilityDialog.open && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-                    <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 w-full max-w-md shadow-xl space-y-4">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3">
+                    <div className="w-full max-w-md max-h-[calc(100dvh-1.5rem)] overflow-y-auto rounded-2xl bg-white p-4 shadow-xl dark:bg-gray-800 space-y-4 sm:p-6">
                         <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Cài đặt quyền xem</h2>
                         <VisibilityPicker
                             user={user}
@@ -2738,12 +2957,16 @@ export default function DocumentsPage() {
 
             {/* ── Quiz Create Dialog ───────────────────────────────────── */}
             {quizCreateDialog.open && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-                    <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
-                        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-200 dark:border-gray-700">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3 sm:p-4">
+                    <div className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-2xl flex-col rounded-2xl bg-white shadow-2xl dark:bg-gray-800 sm:max-h-[90vh]">
+                        <div className="flex items-center justify-between border-b border-gray-200 px-4 pb-4 pt-4 dark:border-gray-700 sm:px-6 sm:pt-5">
                             <div>
                                 <h2 className="text-lg font-bold text-gray-900 dark:text-white">
-                                    {quizCreateDialog.existingQuizId ? "Sửa quiz" : "Tạo quiz"} · {quizCreateDialog.documentName}
+                                    {quizCreateDialog.existingQuizId
+                                        ? `Sửa quiz · ${quizCreateDialog.documentName}`
+                                        : quizCreateDialog.isNewDocument
+                                            ? "Tạo quiz"
+                                            : `Tạo quiz · ${quizCreateDialog.documentName}`}
                                 </h2>
                                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Tạo bài kiểm tra trắc nghiệm cho tài liệu học</p>
                             </div>
@@ -2752,22 +2975,25 @@ export default function DocumentsPage() {
                             </button>
                         </div>
 
-                        <div className="overflow-y-auto flex-1 px-6 py-4 space-y-4">
-                            {quizCreateDialog.isNewDocument && (
-                                <div>
-                                    <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1.5">
-                                        Tên bài kiểm tra <span className="text-red-500">*</span>
-                                    </label>
-                                    <Input
-                                        autoFocus
-                                        placeholder="Nhập tên bài kiểm tra..."
-                                        value={quizCreateDialog.documentName}
-                                        onChange={(e) => setQuizCreateDialog((s) => ({ ...s, documentName: e.target.value, title: e.target.value }))}
-                                    />
-                                </div>
-                            )}
-                            <Input placeholder="Tiêu đề quiz" value={quizCreateDialog.title}
-                                onChange={(e) => setQuizCreateDialog((s) => ({ ...s, title: e.target.value }))} />
+                        <div className="overflow-y-auto flex-1 space-y-4 px-4 py-4 sm:px-6">
+                            <div>
+                                <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1.5">
+                                    Tên bài kiểm tra <span className="text-red-500">*</span>
+                                </label>
+                                <Input
+                                    autoFocus
+                                    placeholder="Nhập tên bài kiểm tra..."
+                                    value={quizCreateDialog.title}
+                                    onChange={(e) => {
+                                        const value = e.target.value
+                                        setQuizCreateDialog((s) => ({
+                                            ...s,
+                                            title: value,
+                                            ...(s.isNewDocument ? { documentName: value } : {}),
+                                        }))
+                                    }}
+                                />
+                            </div>
                             <Input placeholder="Mô tả (tuỳ chọn)" value={quizCreateDialog.description}
                                 onChange={(e) => setQuizCreateDialog((s) => ({ ...s, description: e.target.value }))} />
                             <div className="flex items-center gap-2">
@@ -2778,12 +3004,68 @@ export default function DocumentsPage() {
                                 <span className="text-sm text-gray-500">phút</span>
                             </div>
 
+                            {/* Auto-generate section */}
+                            {!quizCreateDialog.isNewDocument && (
+                                <div className="rounded-xl border border-violet-200 dark:border-violet-800 bg-violet-50 dark:bg-violet-900/20 p-4 space-y-3">
+                                    <div className="flex items-center gap-2">
+                                        <GraduationCap className="w-4 h-4 text-violet-600 dark:text-violet-400 flex-shrink-0" />
+                                        <p className="text-sm font-semibold text-violet-800 dark:text-violet-300">Tạo câu hỏi tự động bằng AI</p>
+                                    </div>
+                                    <p className="text-xs text-violet-600 dark:text-violet-400">
+                                        AI sẽ đọc nội dung tài liệu và tự động sinh câu hỏi trắc nghiệm. Bạn có thể chỉnh sửa sau khi tạo.
+                                    </p>
+                                    <div
+                                        className={`rounded-lg border px-3 py-2 text-xs ${
+                                            canAutoGenerateByFormat
+                                                ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300"
+                                                : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300"
+                                        }`}
+                                    >
+                                        {canAutoGenerateByFormat ? (
+                                            <>
+                                                Hỗ trợ tạo tự động: <strong>PPTX</strong> và <strong>PDF có text</strong> (bôi đen/copy được).
+                                                Nếu PDF là ảnh scan hoặc font mã hoá lỗi, vui lòng tạo thủ công.
+                                            </>
+                                        ) : (
+                                            <>
+                                                Định dạng hiện tại <strong>{quizCreateDocType?.toUpperCase() ?? "không xác định"}</strong> chưa hỗ trợ tạo tự động.
+                                                Vui lòng dùng <strong>Thêm câu hỏi thủ công</strong>.
+                                            </>
+                                        )}
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <Input
+                                            type="number"
+                                            min={1}
+                                            max={30}
+                                            placeholder="Số câu"
+                                            className="w-28 h-8 text-sm"
+                                            value={quizCreateDialog.autoQuestionCount ?? ""}
+                                            onChange={(e) => setQuizCreateDialog((s) => ({ ...s, autoQuestionCount: e.target.value }))}
+                                        />
+                                        <span className="text-xs text-violet-600 dark:text-violet-400">câu hỏi (tối đa 30)</span>
+                                        <Button
+                                            size="sm"
+                                            disabled={quizCreateDialog.isGenerating || !canAutoGenerateByFormat}
+                                            onClick={() => void handleAutoGenerateQuiz()}
+                                            className="ml-auto bg-violet-600 hover:bg-violet-700 text-white h-8 text-xs"
+                                        >
+                                            {quizCreateDialog.isGenerating ? (
+                                                <><span className="animate-spin mr-1.5">⏳</span>Đang tạo...</>
+                                            ) : (
+                                                <><GraduationCap className="w-3.5 h-3.5 mr-1.5" />Tạo tự động</>
+                                            )}
+                                        </Button>
+                                    </div>
+                                </div>
+                            )}
+
                             <div className="space-y-4">
                                 <div className="flex items-center justify-between">
                                     <p className="text-sm font-semibold text-gray-700 dark:text-gray-300">Câu hỏi ({quizCreateDialog.questions.length})</p>
                                     <Button size="sm" variant="outline" className="bg-transparent text-xs h-8"
                                         onClick={handleAddQuizQuestion}>
-                                        <Plus className="w-3.5 h-3.5 mr-1" />Thêm câu hỏi
+                                        <Plus className="w-3.5 h-3.5 mr-1" />Thêm câu hỏi thủ công
                                     </Button>
                                 </div>
                                 {quizCreateDialog.questions.map((q, qi) => (
@@ -2803,7 +3085,7 @@ export default function DocumentsPage() {
                                                 </button>
                                             )}
                                         </div>
-                                        <div className="grid grid-cols-2 gap-2">
+                                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                                             {q.options.map((opt, oi) => (
                                                 <div key={oi} className={`flex items-center gap-2 p-2 rounded-lg border ${q.correctIndex === oi ? "border-green-500 bg-green-50 dark:bg-green-900/20" : "border-gray-200 dark:border-gray-700"}`}>
                                                     <button onClick={() => setQuizCreateDialog((s) => {
@@ -2838,7 +3120,7 @@ export default function DocumentsPage() {
                             </div>
                         </div>
 
-                        <div className="flex gap-2 justify-end px-6 py-4 border-t border-gray-200 dark:border-gray-700">
+                        <div className="flex justify-end gap-2 border-t border-gray-200 px-4 py-4 dark:border-gray-700 sm:px-6">
                             <Button variant="outline" className="bg-transparent" onClick={() => setQuizCreateDialog(defaultQuizCreate())}>Huỷ</Button>
                             <Button disabled={isSubmitting} onClick={() => void handleSaveQuiz()} className="bg-violet-600 hover:bg-violet-700">
                                 <ClipboardCheck className="w-4 h-4 mr-2" />
@@ -2851,12 +3133,33 @@ export default function DocumentsPage() {
 
             {/* ── Quiz Take Modal ──────────────────────────────────────── */}
             {quizTakeModal.open && quizTakeModal.quiz && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-                    <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 sm:p-4">
+                    <div className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-2xl flex-col rounded-2xl bg-white shadow-2xl dark:bg-gray-800 sm:max-h-[90vh]">
                         {!quizTakeModal.isSubmitted ? (
                             <>
+                                {/* Anti-cheat violation banner */}
+                                {quizTakeModal.violationCount > 0 && (
+                                    <div className="px-5 py-2.5 bg-red-600 text-white rounded-t-2xl">
+                                        <div className="flex items-center gap-2 text-sm font-medium">
+                                            <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                                            <span>Vi phạm: {quizTakeModal.violationCount}/{MAX_QUIZ_VIOLATIONS} lần – Vượt quá giới hạn sẽ tự động nộp bài!</span>
+                                        </div>
+                                        {quizTakeModal.lastViolationReason ? (
+                                            <p className="mt-1 text-xs text-red-100">
+                                                Lần gần nhất: {quizTakeModal.lastViolationReason}
+                                            </p>
+                                        ) : null}
+                                    </div>
+                                )}
+                                {/* Fullscreen notice */}
+                                {quizTakeModal.violationCount === 0 && (
+                                    <div className="flex items-center gap-2 px-5 py-2 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 text-xs rounded-t-2xl border-b border-blue-100 dark:border-blue-800">
+                                        <Maximize className="w-3.5 h-3.5 flex-shrink-0" />
+                                        <span>Bài thi đang chạy ở chế độ toàn màn hình. Không được chuyển tab hoặc rời trang.</span>
+                                    </div>
+                                )}
                                 {/* Header + timer */}
-                                <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-200 dark:border-gray-700">
+                                <div className="flex items-start justify-between gap-3 border-b border-gray-200 px-4 pb-4 pt-4 dark:border-gray-700 sm:items-center sm:px-6 sm:pt-5">
                                     <div>
                                         <h2 className="text-lg font-bold text-gray-900 dark:text-white">{quizTakeModal.quiz.title}</h2>
                                         <p className="text-xs text-gray-500 mt-0.5">
@@ -2870,24 +3173,28 @@ export default function DocumentsPage() {
                                 </div>
 
                                 {/* Question */}
-                                <div className="flex-1 overflow-y-auto px-6 py-5">
+                                <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5">
                                     {(() => {
-                                        const q = quizTakeModal.quiz.questions[quizTakeModal.currentQuestion]!
+                                        const displayedQuestionIndex = quizTakeModal.currentQuestion
+                                        const originalQuestionIndex = quizTakeModal.questionOrder[displayedQuestionIndex] ?? displayedQuestionIndex
+                                        const q = quizTakeModal.quiz.questions[originalQuestionIndex]!
+                                        const optionOrder = quizTakeModal.optionOrderByQuestion[originalQuestionIndex] ?? [0, 1, 2, 3]
                                         return (
                                             <div className="space-y-4">
                                                 <p className="text-base font-medium text-gray-900 dark:text-white">{q.text}</p>
                                                 <div className="space-y-3">
-                                                    {q.options.map((opt, oi) => {
-                                                        const selected = quizTakeModal.answers[quizTakeModal.currentQuestion] === oi
+                                                    {optionOrder.map((originalOptionIndex, displayedOptionIndex) => {
+                                                        const opt = q.options[originalOptionIndex] ?? ""
+                                                        const selected = quizTakeModal.answers[originalQuestionIndex] === originalOptionIndex
                                                         return (
-                                                            <button key={oi} onClick={() => setQuizTakeModal((prev) => {
+                                                            <button key={`${originalQuestionIndex}-${originalOptionIndex}`} onClick={() => setQuizTakeModal((prev) => {
                                                                 const answers = [...prev.answers]
-                                                                answers[prev.currentQuestion] = oi
+                                                                answers[originalQuestionIndex] = originalOptionIndex
                                                                 return { ...prev, answers }
                                                             })}
                                                                 className={`w-full text-left flex items-center gap-3 px-4 py-3 rounded-xl border-2 transition-all ${selected ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20" : "border-gray-200 dark:border-gray-700 hover:border-blue-300 dark:hover:border-blue-600"}`}>
                                                                 <span className={`w-6 h-6 rounded-full border-2 flex-shrink-0 flex items-center justify-center text-xs font-bold ${selected ? "border-blue-500 bg-blue-500 text-white" : "border-gray-300 text-gray-400"}`}>
-                                                                    {["A","B","C","D"][oi]}
+                                                                    {["A","B","C","D"][displayedOptionIndex]}
                                                                 </span>
                                                                 <span className="text-sm text-gray-800 dark:text-gray-200">{opt}</span>
                                                             </button>
@@ -2896,9 +3203,9 @@ export default function DocumentsPage() {
                                                 </div>
                                                 {/* Progress dots */}
                                                 <div className="flex gap-1.5 flex-wrap pt-2">
-                                                    {quizTakeModal.quiz.questions.map((_, i) => (
+                                                    {quizTakeModal.questionOrder.map((originalIndex, i) => (
                                                         <button key={i} onClick={() => setQuizTakeModal((prev) => ({ ...prev, currentQuestion: i }))}
-                                                            className={`w-7 h-7 rounded-full text-xs font-medium transition-all ${i === quizTakeModal.currentQuestion ? "bg-blue-600 text-white" : quizTakeModal.answers[i] !== -1 ? "bg-green-500 text-white" : "bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-400"}`}>
+                                                            className={`w-7 h-7 rounded-full text-xs font-medium transition-all ${i === quizTakeModal.currentQuestion ? "bg-blue-600 text-white" : quizTakeModal.answers[originalIndex] !== -1 ? "bg-green-500 text-white" : "bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-400"}`}>
                                                             {i + 1}
                                                         </button>
                                                     ))}
@@ -2909,7 +3216,7 @@ export default function DocumentsPage() {
                                 </div>
 
                                 {/* Navigation */}
-                                <div className="flex items-center justify-between px-6 py-4 border-t border-gray-200 dark:border-gray-700">
+                                <div className="flex items-center justify-between border-t border-gray-200 px-4 py-4 dark:border-gray-700 sm:px-6">
                                     <Button variant="outline" className="bg-transparent" disabled={quizTakeModal.currentQuestion === 0}
                                         onClick={() => setQuizTakeModal((prev) => ({ ...prev, currentQuestion: prev.currentQuestion - 1 }))}>
                                         <ChevronLeft className="w-4 h-4 mr-1" />Trước
@@ -2929,7 +3236,7 @@ export default function DocumentsPage() {
                             </>
                         ) : (
                             /* Result screen */
-                            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
+                            <div className="flex flex-1 flex-col items-center justify-center p-4 text-center sm:p-8">
                                 <div className={`w-20 h-20 rounded-full flex items-center justify-center mb-4 ${
                                     (quizTakeModal.result?.score ?? 0) >= 80 ? "bg-green-100 dark:bg-green-900/30" :
                                     (quizTakeModal.result?.score ?? 0) >= 50 ? "bg-yellow-100 dark:bg-yellow-900/30" : "bg-red-100 dark:bg-red-900/30"
@@ -2977,9 +3284,9 @@ export default function DocumentsPage() {
 
             {/* ── Quiz Results Modal (Leader) ──────────────────────────── */}
             {quizResultsModal.open && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-                    <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] flex flex-col">
-                        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-200 dark:border-gray-700">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3 sm:p-4">
+                    <div className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-lg flex-col rounded-2xl bg-white shadow-2xl dark:bg-gray-800 sm:max-h-[85vh]">
+                        <div className="flex items-center justify-between border-b border-gray-200 px-4 pb-4 pt-4 dark:border-gray-700 sm:px-6 sm:pt-5">
                             <div>
                                 <h2 className="text-lg font-bold text-gray-900 dark:text-white">Kết quả quiz</h2>
                                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{quizResultsModal.documentName}</p>
@@ -2989,7 +3296,7 @@ export default function DocumentsPage() {
                                 <X className="w-5 h-5" />
                             </button>
                         </div>
-                        <div className="flex-1 overflow-y-auto px-6 py-4">
+                        <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
                             {quizResultsModal.isLoading ? (
                                 <p className="text-sm text-gray-500 text-center py-8">Đang tải...</p>
                             ) : (
@@ -3002,7 +3309,7 @@ export default function DocumentsPage() {
                                             <>
                                                 <div>
                                                     <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">Trạng thái học nhân viên</h3>
-                                                    <div className="grid grid-cols-3 gap-3 mb-3">
+                                                    <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
                                                         <div className="text-center px-3 py-2 rounded-xl bg-green-50 dark:bg-green-900/20">
                                                             <p className="text-lg font-bold text-green-700 dark:text-green-300">{completed.length}</p>
                                                             <p className="text-xs text-green-600 dark:text-green-400">Đã học</p>
@@ -3059,7 +3366,7 @@ export default function DocumentsPage() {
                                                         </div>
                                                     ) : (
                                                         <>
-                                                            <div className="grid grid-cols-3 gap-3 mb-4">
+                                                            <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
                                                                 <div className="text-center px-3 py-2 rounded-xl bg-blue-50 dark:bg-blue-900/20">
                                                                     <p className="text-lg font-bold text-blue-700 dark:text-blue-300">{quizResultsModal.attempts.length}</p>
                                                                     <p className="text-xs text-blue-600 dark:text-blue-400">Đã nộp</p>
@@ -3078,7 +3385,7 @@ export default function DocumentsPage() {
                                                                 </div>
                                                             </div>
                                                             {quizResultsModal.attempts.map((att) => (
-                                                                <div key={att.id} className="flex items-center justify-between px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/30">
+                                                                <div key={att.id} className="flex flex-col gap-3 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 dark:border-gray-700 dark:bg-gray-900/30 sm:flex-row sm:items-center sm:justify-between">
                                                                     <div className="flex items-center gap-3">
                                                                         <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white ${att.score >= 80 ? "bg-green-500" : att.score >= 50 ? "bg-yellow-500" : "bg-red-500"}`}>
                                                                             {att.personName?.[0] ?? "?"}
@@ -3148,7 +3455,7 @@ function VisibilityPicker({
     return (
         <div className="space-y-3">
             <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Ai có thể xem?</p>
-            <div className="flex gap-3">
+            <div className="flex flex-col gap-3 sm:flex-row">
                 <button
                     type="button"
                     onClick={() => onChange(officeValue)}

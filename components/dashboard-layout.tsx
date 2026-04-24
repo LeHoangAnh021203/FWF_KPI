@@ -41,6 +41,8 @@ import {
     CheckCircle,
     Users,
     ClipboardCheck,
+    Menu,
+    X as XIcon,
 } from "lucide-react"
 
 type SidebarPath = "/" | "/dashboard" | "/projects" | "/people" | "/chats" | "/documents" | "/recipts" | "/tests"
@@ -90,7 +92,7 @@ type RealtimeEventPayload = {
     type?: string
     actorId?: string
     action?: "created" | "updated" | "deleted" | "assigned" | "requested" | "approved" | "rejected"
-    entityType?: "task" | "project" | "schedule" | "person" | "profile" | "approval"
+    entityType?: "task" | "project" | "schedule" | "document" | "quiz" | "learning_progress" | "person" | "profile" | "approval"
     entityLabel?: string
     entityId?: string
     targetPersonIds?: string[]
@@ -149,6 +151,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const [isLoadingMoreNotifications, setIsLoadingMoreNotifications] = useState(false)
     const [approvalActionKey, setApprovalActionKey] = useState<string | null>(null)
     const [isSigningOut, setIsSigningOut] = useState(false)
+    const [isSidebarOpen, setIsSidebarOpen] = useState(false)
     const selectedProjectId = searchParams.get("projectId")
     const isAdminUser = isAdminLikeRole(user?.role)
     const todayLabel = useMemo(
@@ -254,6 +257,26 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             } else {
                 title = "Danh bạ cập nhật"
                 message = `${actorName} vừa cập nhật thông tin thành viên.`
+            }
+        } else if (event.type === "learning.updated") {
+            if (event.entityType === "quiz" && event.action === "created") {
+                title = "Quiz mới"
+                message = `${actorName} vừa tạo quiz cho "${entityLabel}".`
+            } else if (event.entityType === "quiz" && event.action === "deleted") {
+                title = "Quiz đã xoá"
+                message = `${actorName} vừa xoá quiz của "${entityLabel}".`
+            } else if (event.entityType === "quiz") {
+                title = "Quiz cập nhật"
+                message = `${actorName} vừa cập nhật quiz của "${entityLabel}".`
+            } else if (event.entityType === "document") {
+                title = event.action === "deleted" ? "Tài liệu đã xoá" : "Tài liệu cập nhật"
+                message = `${actorName} vừa ${event.action === "deleted" ? "xoá" : "cập nhật"} tài liệu "${entityLabel}".`
+            } else if (event.entityType === "learning_progress") {
+                title = "Tiến độ học tập"
+                message = `${actorName} vừa cập nhật tiến độ học của "${entityLabel}".`
+            } else {
+                title = "E-learning cập nhật"
+                message = `${actorName} vừa cập nhật dữ liệu học tập.`
             }
         } else if (event.type === "approval.updated") {
             if (event.action === "requested") {
@@ -516,7 +539,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 void loadApprovalRequests()
             }
 
-            if (payload.type === "directory.updated" || payload.type === "workspace.updated" || payload.type === "schedule.updated") {
+            if (
+                payload.type === "directory.updated" ||
+                payload.type === "workspace.updated" ||
+                payload.type === "schedule.updated" ||
+                payload.type === "learning.updated"
+            ) {
                 void refreshSession().catch(() => {
                     // Ignore transient realtime refresh failures.
                 })
@@ -526,12 +554,31 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         })
     }, [loadApprovalRequests, loadNotifications, refreshSession, user?.personId])
 
+    // Close sidebar on mobile when navigating
+    const navigateTo = (path: Parameters<typeof router.push>[0]) => {
+        router.push(path)
+        setIsSidebarOpen(false)
+    }
+
+    const mobileBottomNavItems = sidebarItems.slice(0, 5)
+
     return (
         <div className="flex h-screen bg-gray-50 dark:bg-gray-900">
+            {/* Mobile overlay */}
+            {isSidebarOpen && (
+                <div
+                    className="fixed inset-0 z-20 bg-black/50 md:hidden"
+                    onClick={() => setIsSidebarOpen(false)}
+                />
+            )}
+
             {/* Sidebar */}
-            <div className="w-64 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex flex-col">
-                <div className="p-6">
-                    <h1 className="text-2xl font-bold tracking-tight text-orange-500">Face Wash Fox</h1>
+            <div className={`fixed inset-y-0 left-0 z-30 flex w-64 flex-col bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 transition-transform duration-200 ease-in-out md:static md:translate-x-0 ${isSidebarOpen ? "translate-x-0" : "-translate-x-full"}`}>
+                <div className="flex items-center justify-between p-4 md:p-6">
+                    <h1 className="text-xl font-bold tracking-tight text-orange-500 md:text-2xl">Face Wash Fox</h1>
+                    <button className="rounded-lg p-1.5 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 md:hidden" onClick={() => setIsSidebarOpen(false)}>
+                        <XIcon className="h-5 w-5" />
+                    </button>
                 </div>
 
                 <nav className="flex-1 px-4">
@@ -544,13 +591,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                         return (
                         <button
                             key={item.name}
-                            onClick={() => router.push(item.path as Parameters<typeof router.push>[0])}
-                            className={`w-full flex items-center px-3 py-2 mb-1 text-sm font-medium rounded-lg transition-colors ${isActive
+                            onClick={() => navigateTo(item.path as Parameters<typeof router.push>[0])}
+                            className={`w-full flex items-center px-3 py-2.5 mb-1 text-sm font-medium rounded-lg transition-colors ${isActive
                                 ? "bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300"
                                 : "text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
                                 }`}
                         >
-                            <item.icon className="w-4 h-4 mr-3" />
+                            <item.icon className="w-4 h-4 mr-3 flex-shrink-0" />
                             {item.name}
                         </button>
                         )
@@ -696,19 +743,29 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </div>
 
             {/* Main Content */}
-            <div className="flex-1 flex flex-col overflow-hidden">
+            <div className="flex flex-1 flex-col overflow-hidden">
                 {/* Header */}
-                <header className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-6 py-4">
-                    <div className="flex items-center justify-between">
-                        <div className="flex items-center space-x-4">
-                            <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 shadow-sm dark:border-gray-700 dark:bg-gray-900">
+                <header className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-3 py-3 md:px-6 md:py-4">
+                    <div className="flex items-center justify-between gap-2">
+                        {/* Left: hamburger (mobile) + date (desktop) */}
+                        <div className="flex items-center gap-3">
+                            <button
+                                className="rounded-lg p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700 md:hidden"
+                                onClick={() => setIsSidebarOpen(true)}
+                            >
+                                <Menu className="h-5 w-5" />
+                            </button>
+                            <div className="hidden rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 shadow-sm dark:border-gray-700 dark:bg-gray-900 md:block">
                                 <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Today</p>
                                 <p className="text-base font-semibold text-gray-900 dark:text-white">{todayLabel}</p>
                             </div>
+                            {/* App name on mobile */}
+                            <span className="text-base font-bold text-orange-500 md:hidden">Face Wash Fox</span>
                         </div>
 
-                        <div className="flex items-center space-x-4">
-                            <div className="flex items-center">
+                        <div className="flex items-center gap-2 md:gap-4">
+                            {/* New Team button - desktop only */}
+                            <div className="hidden items-center md:flex">
                                 <Button
                                     className="bg-blue-600 hover:bg-blue-700 dark:bg-blue-700 dark:hover:bg-blue-800 rounded-r-none"
                                     onClick={() => setIsProjectDialogOpen(true)}
@@ -722,25 +779,28 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                             <ChevronDown className="w-4 h-4" />
                                         </Button>
                                     </DropdownMenuTrigger>
-                                    <DropdownMenuContent
-                                        align="end"
-                                        className="bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700"
-                                    >
+                                    <DropdownMenuContent align="end" className="bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700">
                                         <DropdownMenuItem className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700">
-                                            <Folder className="w-4 h-4 mr-2" />
-                                            New Folder
+                                            <Folder className="w-4 h-4 mr-2" />New Folder
                                         </DropdownMenuItem>
                                         <DropdownMenuItem className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700">
-                                            <Template className="w-4 h-4 mr-2" />
-                                            From Template
+                                            <Template className="w-4 h-4 mr-2" />From Template
                                         </DropdownMenuItem>
                                         <DropdownMenuItem className="text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700">
-                                            <Import className="w-4 h-4 mr-2" />
-                                            Import Team
+                                            <Import className="w-4 h-4 mr-2" />Import Team
                                         </DropdownMenuItem>
                                     </DropdownMenuContent>
                                 </DropdownMenu>
                             </div>
+
+                            {/* New Team button - mobile compact */}
+                            <Button
+                                size="icon"
+                                className="bg-blue-600 hover:bg-blue-700 h-9 w-9 md:hidden"
+                                onClick={() => setIsProjectDialogOpen(true)}
+                            >
+                                <Plus className="h-4 w-4" />
+                            </Button>
 
                             <ThemeToggle />
 
@@ -754,7 +814,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                     </Button>
                                 </PopoverTrigger>
                                 <PopoverContent
-                                    className="w-80 bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700"
+                                    className="w-[min(20rem,calc(100vw-1rem))] bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700"
                                     align="end"
                                 >
                                     <div className="space-y-4">
@@ -877,7 +937,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                     </Avatar>
                                 </PopoverTrigger>
                                 <PopoverContent
-                                    className="w-64 bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700"
+                                    className="w-[min(16rem,calc(100vw-1rem))] bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700"
                                     align="end"
                                 >
                                     <div className="space-y-4">
@@ -939,8 +999,33 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 </header>
 
                 {/* Page Content */}
-                <div className="flex-1 overflow-auto bg-gray-50 dark:bg-gray-900">{children}</div>
+                <div className="flex-1 overflow-auto bg-gray-50 pb-16 dark:bg-gray-900 md:pb-0">{children}</div>
             </div>
+
+            {/* Mobile Bottom Navigation */}
+            <nav className="fixed bottom-0 left-0 right-0 z-20 flex items-center justify-around border-t border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800 md:hidden" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
+                {mobileBottomNavItems.map((item) => {
+                    const isActive = item.path === "/" ? pathname === "/" && !selectedProjectId : pathname === item.path
+                    return (
+                        <button
+                            key={item.name}
+                            onClick={() => navigateTo(item.path as Parameters<typeof router.push>[0])}
+                            className={`flex flex-1 flex-col items-center gap-0.5 py-2.5 text-[10px] font-medium transition-colors ${isActive ? "text-blue-600 dark:text-blue-400" : "text-gray-500 dark:text-gray-400"}`}
+                        >
+                            <item.icon className={`h-5 w-5 ${isActive ? "text-blue-600 dark:text-blue-400" : "text-gray-400 dark:text-gray-500"}`} />
+                            <span className="max-w-[56px] truncate">{item.name}</span>
+                        </button>
+                    )
+                })}
+                {/* More button → opens sidebar */}
+                <button
+                    onClick={() => setIsSidebarOpen(true)}
+                    className="flex flex-1 flex-col items-center gap-0.5 py-2.5 text-[10px] font-medium text-gray-500 dark:text-gray-400"
+                >
+                    <Menu className="h-5 w-5 text-gray-400 dark:text-gray-500" />
+                    <span>Thêm</span>
+                </button>
+            </nav>
 
             <Dialog open={isProfileDialogOpen} onOpenChange={setIsProfileDialogOpen}>
                 <DialogContent className="sm:max-w-xl bg-white dark:bg-gray-800">
