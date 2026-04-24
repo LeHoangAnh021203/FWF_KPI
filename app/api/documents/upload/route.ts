@@ -1,12 +1,20 @@
 import { NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
 import { GridFSBucket } from "mongodb";
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
 import { getMongoDb } from "@/lib/mongodb";
 import { getSessionUserId } from "@/lib/server/session";
 import type { LearningPlan, LearningStepMedia } from "@/lib/documents";
+import { countPdfPages, extractPdfTextContent, splitTextByPage } from "@/lib/server/pdf-text";
 
-export const maxDuration = 60;
+export const maxDuration = 180;
+const execFileAsync = promisify(execFile);
 
 function inferMimeType(fileName: string) {
   const lower = fileName.toLowerCase();
@@ -26,12 +34,6 @@ function inferBaseName(fileName: string) {
   return idx > 0 ? fileName.slice(0, idx) : fileName;
 }
 
-function countPdfPages(buffer: Buffer) {
-  const raw = buffer.toString("latin1");
-  const matches = raw.match(/\/Type\s*\/Page\b/g);
-  return Math.max(1, matches?.length ?? 1);
-}
-
 function resolvePptxTarget(target: string) {
   const normalized = target.replace(/\\/g, "/").replace(/^\/+/, "");
   if (normalized.startsWith("ppt/")) return normalized;
@@ -48,6 +50,38 @@ function isVideoPath(path: string) {
     lower.endsWith(".webm") ||
     lower.endsWith(".m4v")
   );
+}
+
+function collectSlideTextNodes(node: unknown, collector: string[]) {
+  if (!node || typeof node !== "object") return;
+
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      collectSlideTextNodes(child, collector);
+    }
+    return;
+  }
+
+  const record = node as Record<string, unknown>;
+  for (const [key, value] of Object.entries(record)) {
+    if ((key === "a:t" || key === "t") && typeof value === "string") {
+      const normalized = value.replace(/\s+/g, " ").trim();
+      if (normalized) collector.push(normalized);
+      continue;
+    }
+    collectSlideTextNodes(value, collector);
+  }
+}
+
+async function extractPptxSlideText(zip: JSZip, parser: XMLParser, slidePath: string) {
+  const slideFile = zip.file(slidePath);
+  if (!slideFile) return "";
+
+  const slideXml = await slideFile.async("text");
+  const parsed = parser.parse(slideXml) as Record<string, unknown>;
+  const textNodes: string[] = [];
+  collectSlideTextNodes(parsed, textNodes);
+  return textNodes.join("\n");
 }
 
 async function uploadBufferToGridFs(
@@ -76,8 +110,10 @@ async function uploadBufferToGridFs(
   return stream.id.toString();
 }
 
-function buildPdfLearningPlan(buffer: Buffer): LearningPlan {
+async function buildPdfLearningPlan(buffer: Buffer): Promise<LearningPlan> {
   const pageCount = countPdfPages(buffer);
+  const extractedText = await extractPdfTextContent(buffer);
+  const pageContents = splitTextByPage(extractedText, pageCount);
   return {
     sourceType: "pdf",
     generatedAt: new Date().toISOString(),
@@ -86,6 +122,7 @@ function buildPdfLearningPlan(buffer: Buffer): LearningPlan {
       title: `Trang ${index + 1}`,
       kind: "page" as const,
       pageNumber: index + 1,
+      content: pageContents[index] ?? "",
       estimatedSeconds: 25,
     })),
   };
@@ -94,7 +131,8 @@ function buildPdfLearningPlan(buffer: Buffer): LearningPlan {
 async function buildPptxLearningPlan(
   buffer: Buffer,
   bucket: GridFSBucket,
-  originalName: string
+  originalName: string,
+  previewUrl?: string
 ): Promise<LearningPlan | undefined> {
   const zip = await JSZip.loadAsync(buffer);
   const parser = new XMLParser({
@@ -117,9 +155,10 @@ async function buildPptxLearningPlan(
 
   const steps = await Promise.all(
     slidePaths.map(async (slidePath, idx) => {
-      const slideNumber = idx + 1;
+      const slideNumber = Number(slidePath.match(/slide(\d+)\.xml$/)?.[1] ?? `${idx + 1}`);
       const relPath = `ppt/slides/_rels/slide${slideNumber}.xml.rels`;
       const media: LearningStepMedia[] = [];
+      const slideText = await extractPptxSlideText(zip, parser, slidePath);
 
       const relFile = zip.file(relPath);
       if (relFile) {
@@ -175,6 +214,8 @@ async function buildPptxLearningPlan(
         title: `Slide ${slideNumber}`,
         kind: "slide" as const,
         slideNumber,
+        pageNumber: slideNumber,
+        content: slideText,
         estimatedSeconds: media.length > 0 ? 0 : 25,
         media,
       };
@@ -185,7 +226,27 @@ async function buildPptxLearningPlan(
     sourceType: "pptx",
     generatedAt: new Date().toISOString(),
     steps,
+    previewUrl,
   };
+}
+
+async function convertPptxToPdfBuffer(buffer: Buffer) {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "fwf-pptx-"));
+  const inputBase = `input-${randomUUID()}`;
+  const inputPath = path.join(tempDir, `${inputBase}.pptx`);
+  const outputPath = path.join(tempDir, `${inputBase}.pdf`);
+
+  try {
+    await writeFile(inputPath, buffer);
+    await execFileAsync(
+      "soffice",
+      ["--headless", "--convert-to", "pdf:writer_pdf_Export", "--outdir", tempDir, inputPath],
+      { timeout: 180000, maxBuffer: 10 * 1024 * 1024 }
+    );
+    return await readFile(outputPath);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 }
 
 export async function POST(request: Request) {
@@ -209,12 +270,25 @@ export async function POST(request: Request) {
     const fileId = await uploadBufferToGridFs(bucket, file.name, buffer, mimeType);
     const url = `/api/files/${fileId}`;
     const lowerName = file.name.toLowerCase();
-    const learningPlan =
-      lowerName.endsWith(".pdf")
-        ? buildPdfLearningPlan(buffer)
-        : lowerName.endsWith(".pptx")
-          ? await buildPptxLearningPlan(buffer, bucket, file.name)
-          : undefined;
+    let learningPlan: LearningPlan | undefined;
+    if (lowerName.endsWith(".pdf")) {
+      learningPlan = await buildPdfLearningPlan(buffer);
+    } else if (lowerName.endsWith(".pptx")) {
+      let previewUrl: string | undefined;
+      try {
+        const previewPdfBuffer = await convertPptxToPdfBuffer(buffer);
+        const previewPdfId = await uploadBufferToGridFs(
+          bucket,
+          `${inferBaseName(file.name)}-preview.pdf`,
+          previewPdfBuffer,
+          "application/pdf"
+        );
+        previewUrl = `/api/files/${previewPdfId}`;
+      } catch (conversionError) {
+        console.error("PPTX to PDF conversion failed:", conversionError);
+      }
+      learningPlan = await buildPptxLearningPlan(buffer, bucket, file.name, previewUrl);
+    }
 
     return NextResponse.json({ ok: true, fileId, url, learningPlan });
   } catch (error) {

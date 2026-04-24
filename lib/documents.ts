@@ -21,6 +21,7 @@ export type LearningStep = {
   kind: "page" | "slide";
   pageNumber?: number;
   slideNumber?: number;
+  content?: string;
   estimatedSeconds: number;
   media?: LearningStepMedia[];
 };
@@ -29,6 +30,7 @@ export type LearningPlan = {
   sourceType: "pdf" | "pptx";
   steps: LearningStep[];
   generatedAt: string;
+  previewUrl?: string;
 };
 
 export interface Document {
