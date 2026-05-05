@@ -2,7 +2,7 @@
 
 import type React from "react"
 
-import { useState, useRef, useEffect, useCallback } from "react"
+import { useState, useRef, useEffect, useCallback, useMemo } from "react"
 import { useDirectory } from "@/components/directory-provider"
 import { useAuth } from "@/components/auth-provider"
 import { subscribeToPersonChannel } from "@/lib/client/realtime"
@@ -82,6 +82,7 @@ type QuizAttemptRecord = {
     documentId: string
     personId: string
     personName?: string
+    personRole?: string
     answers: number[]
     score: number
     correctAnswers: number
@@ -138,11 +139,14 @@ interface QuizResultsState {
     isLoading: boolean
 }
 
+type QuizResultsRoleFilter = "all" | "store_manager" | "store_lead" | "store_technician" | "trainer" | "other"
+
 type LearningStatusType = "completed" | "in_progress" | "not_started"
 
 type LearningStatusRow = {
     personId: string
     personName: string
+    personRole?: string
     team: string
     status: LearningStatusType
 }
@@ -249,10 +253,18 @@ function buildDefaultVisibilityDialog(user: UserAccount | null): VisibilityDialo
 }
 
 export default function DocumentsPage() {
-    const { people } = useDirectory()
+    const { people, refresh } = useDirectory()
     const { user } = useAuth()
     const isMobile = useIsMobile()
-    const isLeaderOrAdmin = user?.role === "leader" || user?.role === "admin" || user?.role === "ceo"
+    const isLeaderOrAdmin =
+        user?.role === "leader" ||
+        user?.role === "admin" ||
+        user?.role === "ceo" ||
+        (user?.role === "store_trainer" && user?.department === "Cửa hàng")
+    const canViewTeamLearningReports =
+        isLeaderOrAdmin ||
+        (user?.department === "Cửa hàng" &&
+            (user?.role === "store_manager" || user?.role === "store_lead"))
 
     const [searchQuery, setSearchQuery] = useState("")
     const [sortBy, setSortBy] = useState<SortBy>("date")
@@ -269,9 +281,13 @@ export default function DocumentsPage() {
     const [createDocumentDialog, setCreateDocumentDialog] = useState<CreateDocumentDialogState>(
         buildDefaultCreateDocumentDialog(user)
     )
+    const [createRoleFilter, setCreateRoleFilter] = useState<string>("all")
+    const [createMemberSearch, setCreateMemberSearch] = useState("")
     const [visibilityDialog, setVisibilityDialog] = useState<VisibilityDialogState>(
         buildDefaultVisibilityDialog(user)
     )
+    const [visibilityRoleFilter, setVisibilityRoleFilter] = useState<string>("all")
+    const [visibilityMemberSearch, setVisibilityMemberSearch] = useState("")
     const [isSubmitting, setIsSubmitting] = useState(false)
 
     // ── Learning / E-learning state ──────────────────────────────────
@@ -301,6 +317,7 @@ export default function DocumentsPage() {
     const [quizResultsModal, setQuizResultsModal] = useState<QuizResultsState>({
         open: false, documentId: "", documentName: "", attempts: [], learningStatuses: [], isLoading: false,
     })
+    const [quizResultsRoleFilter, setQuizResultsRoleFilter] = useState<QuizResultsRoleFilter>("all")
     const [selectedLearningDoc, setSelectedLearningDoc] = useState<Document | null>(null)
     const [learningProgress, setLearningProgress] = useState<LearningProgressState>({
         completedDocIds: [],
@@ -319,9 +336,84 @@ export default function DocumentsPage() {
 
     const activeFolder = folders.find((f) => f.id === activeFolderId) ?? null
     const currentPerson = people.find((person) => person.id === user?.personId) ?? null
+    const normalizeRoleValue = useCallback((value: string) => value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim(), [])
+    const getRoleGroup = useCallback((role: string) => {
+        const normalized = normalizeRoleValue(role)
+        if (normalized.includes("trainer")) return "trainer"
+        if (normalized.includes("quan li cua hang") || normalized.includes("quan ly cua hang") || normalized.includes("store_manager")) return "store_manager"
+        if (normalized.includes("cua hang truong") || normalized.includes("store_lead")) return "store_lead"
+        if (
+            normalized.includes("ky thuat vien") ||
+            normalized.includes("nhan vien cua hang") ||
+            normalized.includes("store_technician") ||
+            normalized.includes("store_staff")
+        ) return "store_technician"
+        return normalized
+    }, [normalizeRoleValue])
     const officeSelectablePeople = currentPerson
         ? people.filter((person) => person.team === currentPerson.team)
         : []
+    const officeRoleOptions = useMemo(() => {
+        const roles = new Set(officeSelectablePeople.map((person) => person.role))
+        if (currentPerson?.team === "store") {
+            roles.add("Quản lí cửa hàng")
+            roles.add("Cửa hàng trưởng")
+            roles.add("Kỹ thuật viên")
+        }
+
+        roles.delete("Trainer")
+        roles.delete("trainer")
+
+        const preferredOrder = ["Quản lí cửa hàng", "Cửa hàng trưởng", "Kỹ thuật viên"]
+        const orderedRoles = Array.from(roles).sort((a, b) => {
+            const aIndex = preferredOrder.indexOf(a)
+            const bIndex = preferredOrder.indexOf(b)
+            if (aIndex >= 0 && bIndex >= 0) return aIndex - bIndex
+            if (aIndex >= 0) return -1
+            if (bIndex >= 0) return 1
+            return a.localeCompare(b, "vi")
+        })
+
+        return ["all", ...orderedRoles]
+    }, [currentPerson?.team, officeSelectablePeople])
+    const filteredCreatePeople = useMemo(
+        () => {
+            const base =
+                createRoleFilter === "all"
+                    ? officeSelectablePeople
+                    : officeSelectablePeople.filter((person) => {
+                        if (person.role === createRoleFilter) return true
+                        return getRoleGroup(person.role) === getRoleGroup(createRoleFilter)
+                    })
+            const query = createMemberSearch.trim().toLowerCase()
+            if (!query) return base
+            return base.filter(
+                (person) =>
+                    person.name.toLowerCase().includes(query) ||
+                    person.email.toLowerCase().includes(query)
+            )
+        },
+        [createMemberSearch, createRoleFilter, getRoleGroup, officeSelectablePeople]
+    )
+    const filteredVisibilityPeople = useMemo(
+        () => {
+            const base =
+                visibilityRoleFilter === "all"
+                    ? officeSelectablePeople
+                    : officeSelectablePeople.filter((person) => {
+                        if (person.role === visibilityRoleFilter) return true
+                        return getRoleGroup(person.role) === getRoleGroup(visibilityRoleFilter)
+                    })
+            const query = visibilityMemberSearch.trim().toLowerCase()
+            if (!query) return base
+            return base.filter(
+                (person) =>
+                    person.name.toLowerCase().includes(query) ||
+                    person.email.toLowerCase().includes(query)
+            )
+        },
+        [getRoleGroup, officeSelectablePeople, visibilityMemberSearch, visibilityRoleFilter]
+    )
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -531,14 +623,21 @@ export default function DocumentsPage() {
     }
 
     const openCreateDocumentDialog = () => {
+        void refresh().catch(() => {
+            // keep dialog usable even if directory refresh fails
+        })
         setCreateDocumentDialog({
             ...buildDefaultCreateDocumentDialog(user),
             open: true,
         })
+        setCreateRoleFilter("all")
+        setCreateMemberSearch("")
     }
 
     const closeCreateDocumentDialog = () => {
         setCreateDocumentDialog(buildDefaultCreateDocumentDialog(user))
+        setCreateRoleFilter("all")
+        setCreateMemberSearch("")
     }
 
     const handleCreateDocument = async () => {
@@ -767,9 +866,10 @@ export default function DocumentsPage() {
     }
 
     const groups = groupedDocuments()
-    const learningDocs = isLeaderOrAdmin
+    const learningDocs = (isLeaderOrAdmin
         ? documentsData.filter((d) => d.isLearningMaterial)
         : documentsData
+    ).sort((a, b) => new Date(a.modifiedAt).getTime() - new Date(b.modifiedAt).getTime())
     const completedLearningCount = learningDocs.filter((doc) => learningProgress.completedDocIds.includes(doc.id)).length
 
     useEffect(() => {
@@ -1412,6 +1512,7 @@ export default function DocumentsPage() {
     }
 
     const handleOpenQuizResults = async (doc: Document) => {
+        setQuizResultsRoleFilter("all")
         setQuizResultsModal({
             open: true,
             documentId: doc.id,
@@ -2158,11 +2259,9 @@ export default function DocumentsPage() {
                                                                     <DropdownMenuItem onClick={() => handleOpenQuizCreate(doc)}>
                                                                         <Pencil className="w-4 h-4 mr-2" />{quiz ? "Sửa quiz" : "Tạo quiz"}
                                                                     </DropdownMenuItem>
-                                                                    {quiz && (
-                                                                        <DropdownMenuItem onClick={() => void handleOpenQuizResults(doc)}>
-                                                                            <Users className="w-4 h-4 mr-2" />Xem kết quả nhân viên
-                                                                        </DropdownMenuItem>
-                                                                    )}
+                                                                    <DropdownMenuItem onClick={() => void handleOpenQuizResults(doc)}>
+                                                                        <Users className="w-4 h-4 mr-2" />Theo dõi tiến độ nhân viên
+                                                                    </DropdownMenuItem>
                                                                 </DropdownMenuContent>
                                                             </DropdownMenu>
                                                         )}
@@ -2269,6 +2368,13 @@ export default function DocumentsPage() {
                                                         )
                                                     )}
 
+                                                    {!isLeaderOrAdmin && canViewTeamLearningReports && (
+                                                        <Button variant="outline" className="bg-transparent"
+                                                            onClick={() => void handleOpenQuizResults(doc)}>
+                                                            <Users className="w-4 h-4 mr-2" />Theo dõi tiến độ nhân viên
+                                                        </Button>
+                                                    )}
+
                                                     {isLeaderOrAdmin && (
                                                         <div className="flex flex-col gap-3 sm:flex-row">
                                                             <Button variant="outline" className="bg-transparent"
@@ -2277,19 +2383,26 @@ export default function DocumentsPage() {
                                                             </Button>
                                                             <Button variant="outline" className="bg-transparent"
                                                                 onClick={() => void handleOpenQuizResults(doc)}>
-                                                                <Users className="w-4 h-4 mr-2" />Xem kết quả nhân viên
+                                                                <Users className="w-4 h-4 mr-2" />Theo dõi tiến độ nhân viên
                                                             </Button>
                                                         </div>
                                                     )}
                                                 </div>
                                             </div>
-                                        ) : isLeaderOrAdmin ? (
+                                        ) : (isLeaderOrAdmin || canViewTeamLearningReports) ? (
                                             <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-6 text-center dark:border-gray-700 dark:bg-gray-900 sm:p-10">
                                                 <ClipboardCheck className="w-10 h-10 mx-auto mb-3 text-gray-300 dark:text-gray-600" />
                                                 <p className="text-sm font-medium text-gray-600 dark:text-gray-400 mb-4">Chưa có bài kiểm tra cho tài liệu này</p>
-                                                <Button size="sm" onClick={() => handleOpenQuizCreate(doc)}>
-                                                    <Plus className="w-4 h-4 mr-2" />Tạo bài kiểm tra
-                                                </Button>
+                                                <div className="flex flex-wrap items-center justify-center gap-2">
+                                                    <Button size="sm" variant="outline" className="bg-transparent" onClick={() => void handleOpenQuizResults(doc)}>
+                                                        <Users className="w-4 h-4 mr-2" />Theo dõi tiến độ nhân viên
+                                                    </Button>
+                                                    {isLeaderOrAdmin && (
+                                                        <Button size="sm" onClick={() => handleOpenQuizCreate(doc)}>
+                                                            <Plus className="w-4 h-4 mr-2" />Tạo bài kiểm tra
+                                                        </Button>
+                                                    )}
+                                                </div>
                                             </div>
                                         ) : (
                                             <div className="rounded-2xl border border-gray-200 bg-white p-6 text-center dark:border-gray-800 dark:bg-gray-900 sm:p-10">
@@ -2557,6 +2670,7 @@ export default function DocumentsPage() {
                                     visibility: vis === "specific" ? "team" : (vis as DocVisibility),
                                     selectedOfficePersonIds: contextMenu.document.visibleToPersonIds ?? [],
                                 })
+                                setVisibilityRoleFilter("all")
                                 setContextMenu(null)
                             }}>
                             <Globe className="w-4 h-4 mr-2" />Quyền xem
@@ -2735,6 +2849,7 @@ export default function DocumentsPage() {
                                                     visibility: vis === "specific" ? "team" : (vis as DocVisibility),
                                                     selectedOfficePersonIds: selectedDocument.visibleToPersonIds ?? [],
                                                 })
+                                                setVisibilityRoleFilter("all")
                                             }}>
                                             <Globe className="w-4 h-4 mr-2" />Quyền xem
                                         </Button>
@@ -2816,19 +2931,60 @@ export default function DocumentsPage() {
                                 <p className="text-sm font-medium text-gray-700 dark:text-gray-300">
                                     Nhân viên trực thuộc phòng ban
                                 </p>
+                                <div className="rounded-xl border border-gray-200 bg-gray-50/80 p-3 dark:border-gray-700 dark:bg-gray-900/30">
+                                    <div className="grid gap-2 sm:grid-cols-2">
+                                        <select
+                                            value={createRoleFilter}
+                                            onChange={(e) => setCreateRoleFilter(e.target.value)}
+                                            className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+                                        >
+                                            {officeRoleOptions.map((role) => (
+                                                <option key={role} value={role}>
+                                                    {role === "all" ? "Tất cả vai trò" : role}
+                                                </option>
+                                            ))}
+                                        </select>
+                                        <Input
+                                            value={createMemberSearch}
+                                            onChange={(e) => setCreateMemberSearch(e.target.value)}
+                                            placeholder="Tìm tên hoặc email..."
+                                        />
+                                    </div>
+                                    <div className="mt-2 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+                                        <span>{filteredCreatePeople.length} nhân sự phù hợp</span>
+                                        <span>
+                                            Đã chọn {(createDocumentDialog.selectedOfficePersonIds ?? []).length}
+                                        </span>
+                                    </div>
+                                </div>
                                 <div className="max-h-44 overflow-y-auto rounded-xl border border-gray-200 dark:border-gray-700 p-2 space-y-2 bg-white/60 dark:bg-gray-900/20">
-                                    <button
-                                        type="button"
-                                        onClick={() => setCreateDocumentDialog((s) => ({ ...s, selectedOfficePersonIds: [] }))}
-                                        className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-all ${
-                                            (createDocumentDialog.selectedOfficePersonIds ?? []).length === 0
-                                                ? "border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300"
-                                                : "border-gray-300 text-gray-600 hover:border-blue-300 dark:border-gray-600 dark:text-gray-300"
-                                        }`}
-                                    >
-                                        Tất cả
-                                    </button>
-                                    {officeSelectablePeople.map((person) => {
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                setCreateDocumentDialog((s) => ({
+                                                    ...s,
+                                                    selectedOfficePersonIds: Array.from(
+                                                        new Set([
+                                                            ...(s.selectedOfficePersonIds ?? []),
+                                                            ...filteredCreatePeople.map((person) => person.id),
+                                                        ])
+                                                    ),
+                                                }))
+                                            }
+                                            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:border-blue-400 dark:border-gray-600 dark:text-gray-200"
+                                        >
+                                            Chọn tất cả theo bộ lọc
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setCreateDocumentDialog((s) => ({ ...s, selectedOfficePersonIds: [] }))}
+                                            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:border-blue-400 dark:border-gray-600 dark:text-gray-200"
+                                        >
+                                            Bỏ chọn
+                                        </button>
+                                    </div>
+                                    {filteredCreatePeople.map((person) => {
                                         const selected = (createDocumentDialog.selectedOfficePersonIds ?? []).includes(person.id)
                                         return (
                                             <button
@@ -2850,7 +3006,15 @@ export default function DocumentsPage() {
                                                         : "border-gray-300 text-gray-600 hover:border-blue-300 dark:border-gray-600 dark:text-gray-300"
                                                 }`}
                                             >
-                                                {person.name}
+                                                <div className="flex items-center justify-between gap-2">
+                                                    <div>
+                                                        <p className="font-medium">{person.name}</p>
+                                                        <p className="text-xs opacity-75">{person.email}</p>
+                                                    </div>
+                                                    <span className="rounded-md bg-gray-100 px-2 py-0.5 text-[11px] dark:bg-gray-700">
+                                                        {person.role}
+                                                    </span>
+                                                </div>
                                             </button>
                                         )
                                     })}
@@ -2900,19 +3064,60 @@ export default function DocumentsPage() {
                                 <p className="text-sm font-medium text-gray-700 dark:text-gray-300">
                                     Nhân viên trực thuộc phòng ban
                                 </p>
+                                <div className="rounded-xl border border-gray-200 bg-gray-50/80 p-3 dark:border-gray-700 dark:bg-gray-900/30">
+                                    <div className="grid gap-2 sm:grid-cols-2">
+                                        <select
+                                            value={visibilityRoleFilter}
+                                            onChange={(e) => setVisibilityRoleFilter(e.target.value)}
+                                            className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+                                        >
+                                            {officeRoleOptions.map((role) => (
+                                                <option key={`visibility-${role}`} value={role}>
+                                                    {role === "all" ? "Tất cả vai trò" : role}
+                                                </option>
+                                            ))}
+                                        </select>
+                                        <Input
+                                            value={visibilityMemberSearch}
+                                            onChange={(e) => setVisibilityMemberSearch(e.target.value)}
+                                            placeholder="Tìm tên hoặc email..."
+                                        />
+                                    </div>
+                                    <div className="mt-2 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+                                        <span>{filteredVisibilityPeople.length} nhân sự phù hợp</span>
+                                        <span>
+                                            Đã chọn {(visibilityDialog.selectedOfficePersonIds ?? []).length}
+                                        </span>
+                                    </div>
+                                </div>
                                 <div className="max-h-44 overflow-y-auto rounded-xl border border-gray-200 dark:border-gray-700 p-2 space-y-2 bg-white/60 dark:bg-gray-900/20">
-                                    <button
-                                        type="button"
-                                        onClick={() => setVisibilityDialog((s) => ({ ...s, selectedOfficePersonIds: [] }))}
-                                        className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-all ${
-                                            (visibilityDialog.selectedOfficePersonIds ?? []).length === 0
-                                                ? "border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300"
-                                                : "border-gray-300 text-gray-600 hover:border-blue-300 dark:border-gray-600 dark:text-gray-300"
-                                        }`}
-                                    >
-                                        Tất cả
-                                    </button>
-                                    {officeSelectablePeople.map((person) => {
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                setVisibilityDialog((s) => ({
+                                                    ...s,
+                                                    selectedOfficePersonIds: Array.from(
+                                                        new Set([
+                                                            ...(s.selectedOfficePersonIds ?? []),
+                                                            ...filteredVisibilityPeople.map((person) => person.id),
+                                                        ])
+                                                    ),
+                                                }))
+                                            }
+                                            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:border-blue-400 dark:border-gray-600 dark:text-gray-200"
+                                        >
+                                            Chọn tất cả theo bộ lọc
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setVisibilityDialog((s) => ({ ...s, selectedOfficePersonIds: [] }))}
+                                            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:border-blue-400 dark:border-gray-600 dark:text-gray-200"
+                                        >
+                                            Bỏ chọn
+                                        </button>
+                                    </div>
+                                    {filteredVisibilityPeople.map((person) => {
                                         const selected = (visibilityDialog.selectedOfficePersonIds ?? []).includes(person.id)
                                         return (
                                             <button
@@ -2934,7 +3139,15 @@ export default function DocumentsPage() {
                                                         : "border-gray-300 text-gray-600 hover:border-blue-300 dark:border-gray-600 dark:text-gray-300"
                                                 }`}
                                             >
-                                                {person.name}
+                                                <div className="flex items-center justify-between gap-2">
+                                                    <div>
+                                                        <p className="font-medium">{person.name}</p>
+                                                        <p className="text-xs opacity-75">{person.email}</p>
+                                                    </div>
+                                                    <span className="rounded-md bg-gray-100 px-2 py-0.5 text-[11px] dark:bg-gray-700">
+                                                        {person.role}
+                                                    </span>
+                                                </div>
                                             </button>
                                         )
                                     })}
@@ -2946,7 +3159,11 @@ export default function DocumentsPage() {
                         )}
                         <div className="flex gap-2 justify-end">
                             <Button variant="outline" className="bg-transparent"
-                                onClick={() => setVisibilityDialog(buildDefaultVisibilityDialog(user))}>Huỷ</Button>
+                                onClick={() => {
+                                    setVisibilityDialog(buildDefaultVisibilityDialog(user))
+                                    setVisibilityRoleFilter("all")
+                                    setVisibilityMemberSearch("")
+                                }}>Huỷ</Button>
                             <Button onClick={() => void handleSaveVisibility()}>Lưu</Button>
                         </div>
                     </div>
@@ -3302,11 +3519,90 @@ export default function DocumentsPage() {
                             ) : (
                                 <div className="space-y-3">
                                     {(() => {
-                                        const completed = quizResultsModal.learningStatuses.filter((item) => item.status === "completed")
-                                        const inProgress = quizResultsModal.learningStatuses.filter((item) => item.status === "in_progress")
-                                        const notStarted = quizResultsModal.learningStatuses.filter((item) => item.status === "not_started")
+                                        const personRoleById = new Map(people.map((person) => [person.id, person.role]))
+                                        const roleLabelByGroup: Record<Exclude<QuizResultsRoleFilter, "all">, string> = {
+                                            store_manager: "Quản lí cửa hàng",
+                                            store_lead: "Cửa hàng trưởng",
+                                            store_technician: "Kỹ thuật viên",
+                                            trainer: "Trainer",
+                                            other: "Khác",
+                                        }
+                                        const getRoleGroupByPersonId = (personId: string): Exclude<QuizResultsRoleFilter, "all"> => {
+                                            const roleFromStatus = quizResultsModal.learningStatuses.find((item) => item.personId === personId)?.personRole
+                                            const roleFromAttempt = quizResultsModal.attempts.find((item) => item.personId === personId)?.personRole
+                                            const role = roleFromStatus ?? roleFromAttempt ?? personRoleById.get(personId)
+                                            if (!role) return "other"
+                                            const group = getRoleGroup(role)
+                                            if (group === "store_manager" || group === "store_lead" || group === "store_technician" || group === "trainer") {
+                                                return group
+                                            }
+                                            return "other"
+                                        }
+
+                                        const roleGroupsInResult = new Set<Exclude<QuizResultsRoleFilter, "all">>()
+                                        quizResultsModal.learningStatuses.forEach((item) => roleGroupsInResult.add(getRoleGroupByPersonId(item.personId)))
+                                        quizResultsModal.attempts.forEach((item) => roleGroupsInResult.add(getRoleGroupByPersonId(item.personId)))
+                                        const roleOptionOrder: Exclude<QuizResultsRoleFilter, "all">[] = ["store_manager", "store_lead", "store_technician", "trainer", "other"]
+                                        const roleOptions = roleOptionOrder.filter((group) => roleGroupsInResult.has(group))
+
+                                        const allowedRoleOptionsByActor: Record<string, Exclude<QuizResultsRoleFilter, "all">[]> = {
+                                            store_trainer: ["store_manager", "store_lead", "store_technician"],
+                                            store_manager: ["store_lead", "store_technician"],
+                                            store_lead: ["store_technician"],
+                                        }
+                                        const actorRoleOptions =
+                                            allowedRoleOptionsByActor[user?.role ?? ""] ??
+                                            roleOptionOrder.filter((group) => group !== "trainer")
+                                        const scopedRoleOptions = actorRoleOptions.filter((group) => roleOptions.includes(group) || group === "store_lead" || group === "store_technician")
+                                        const effectiveRoleFilter =
+                                            quizResultsRoleFilter === "all" || scopedRoleOptions.includes(quizResultsRoleFilter)
+                                                ? quizResultsRoleFilter
+                                                : "all"
+                                        const roleMatched = (personId: string) =>
+                                            effectiveRoleFilter === "all" || getRoleGroupByPersonId(personId) === effectiveRoleFilter
+
+                                        const scopedLearningStatuses = quizResultsModal.learningStatuses.filter((item) => roleMatched(item.personId))
+                                        const scopedAttempts = quizResultsModal.attempts.filter((attempt) => roleMatched(attempt.personId))
+
+                                        const completed = scopedLearningStatuses.filter((item) => item.status === "completed")
+                                        const inProgress = scopedLearningStatuses.filter((item) => item.status === "in_progress")
+                                        const notStarted = scopedLearningStatuses.filter((item) => item.status === "not_started")
+                                        const submittedPersonIdSet = new Set(scopedAttempts.map((attempt) => attempt.personId))
+                                        const readyButNotSubmitted = completed.filter((item) => !submittedPersonIdSet.has(item.personId))
+                                        const notEligibleForQuiz = [...inProgress, ...notStarted]
                                         return (
                                             <>
+                                                <div className="rounded-xl border border-gray-200 bg-gray-50/80 p-3 dark:border-gray-700 dark:bg-gray-900/30">
+                                                    <p className="mb-2 text-xs font-semibold text-gray-600 dark:text-gray-300">Lọc theo vai trò</p>
+                                                    <div className="flex flex-wrap gap-2">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setQuizResultsRoleFilter("all")}
+                                                            className={`rounded-full border px-3 py-1 text-xs font-medium ${
+                                                                effectiveRoleFilter === "all"
+                                                                    ? "border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300"
+                                                                    : "border-gray-300 text-gray-600 dark:border-gray-600 dark:text-gray-300"
+                                                            }`}
+                                                        >
+                                                            Tất cả
+                                                        </button>
+                                                        {scopedRoleOptions.map((group) => (
+                                                            <button
+                                                                key={group}
+                                                                type="button"
+                                                                onClick={() => setQuizResultsRoleFilter(group)}
+                                                                className={`rounded-full border px-3 py-1 text-xs font-medium ${
+                                                                    effectiveRoleFilter === group
+                                                                        ? "border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300"
+                                                                        : "border-gray-300 text-gray-600 dark:border-gray-600 dark:text-gray-300"
+                                                                }`}
+                                                            >
+                                                                {roleLabelByGroup[group]}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+
                                                 <div>
                                                     <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">Trạng thái học nhân viên</h3>
                                                     <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -3358,8 +3654,60 @@ export default function DocumentsPage() {
                                                 </div>
 
                                                 <div className="pt-2">
+                                                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">Tiến độ làm bài kiểm tra</h3>
+                                                    <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                                                        <div className="text-center px-3 py-2 rounded-xl bg-blue-50 dark:bg-blue-900/20">
+                                                            <p className="text-lg font-bold text-blue-700 dark:text-blue-300">{scopedAttempts.length}</p>
+                                                            <p className="text-xs text-blue-600 dark:text-blue-400">Đã nộp</p>
+                                                        </div>
+                                                        <div className="text-center px-3 py-2 rounded-xl bg-amber-50 dark:bg-amber-900/20">
+                                                            <p className="text-lg font-bold text-amber-700 dark:text-amber-300">{readyButNotSubmitted.length}</p>
+                                                            <p className="text-xs text-amber-600 dark:text-amber-400">Chưa nộp (đã học)</p>
+                                                        </div>
+                                                        <div className="text-center px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-700/40">
+                                                            <p className="text-lg font-bold text-gray-700 dark:text-gray-200">{notEligibleForQuiz.length}</p>
+                                                            <p className="text-xs text-gray-600 dark:text-gray-400">Chưa đủ điều kiện</p>
+                                                        </div>
+                                                    </div>
+                                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                                        <div className="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-900/10 p-3">
+                                                            <p className="text-xs font-semibold text-blue-700 dark:text-blue-300 mb-2">Đã nộp</p>
+                                                            <div className="space-y-1 max-h-40 overflow-y-auto">
+                                                                {scopedAttempts.length === 0 ? (
+                                                                    <p className="text-xs text-blue-700/70 dark:text-blue-300/70">Chưa có</p>
+                                                                ) : scopedAttempts.map((item) => (
+                                                                    <p key={item.id} className="text-xs text-blue-900 dark:text-blue-200">
+                                                                        {item.personName ?? "Unknown"}
+                                                                    </p>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                        <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50/70 dark:bg-amber-900/10 p-3">
+                                                            <p className="text-xs font-semibold text-amber-700 dark:text-amber-300 mb-2">Chưa nộp (đã học)</p>
+                                                            <div className="space-y-1 max-h-40 overflow-y-auto">
+                                                                {readyButNotSubmitted.length === 0 ? (
+                                                                    <p className="text-xs text-amber-700/70 dark:text-amber-300/70">Chưa có</p>
+                                                                ) : readyButNotSubmitted.map((item) => (
+                                                                    <p key={item.personId} className="text-xs text-amber-900 dark:text-amber-200">{item.personName}</p>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                        <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-900/30 p-3">
+                                                            <p className="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">Chưa đủ điều kiện</p>
+                                                            <div className="space-y-1 max-h-40 overflow-y-auto">
+                                                                {notEligibleForQuiz.length === 0 ? (
+                                                                    <p className="text-xs text-gray-500 dark:text-gray-400">Chưa có</p>
+                                                                ) : notEligibleForQuiz.map((item) => (
+                                                                    <p key={item.personId} className="text-xs text-gray-800 dark:text-gray-200">{item.personName}</p>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div className="pt-2">
                                                     <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">Kết quả quiz</h3>
-                                                    {quizResultsModal.attempts.length === 0 ? (
+                                                    {scopedAttempts.length === 0 ? (
                                                         <div className="text-center py-8 rounded-xl border border-dashed border-gray-200 dark:border-gray-700">
                                                             <Users className="w-8 h-8 mx-auto mb-2 text-gray-300" />
                                                             <p className="text-sm text-gray-500 dark:text-gray-400">Chưa có nhân viên nào làm bài.</p>
@@ -3368,30 +3716,32 @@ export default function DocumentsPage() {
                                                         <>
                                                             <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
                                                                 <div className="text-center px-3 py-2 rounded-xl bg-blue-50 dark:bg-blue-900/20">
-                                                                    <p className="text-lg font-bold text-blue-700 dark:text-blue-300">{quizResultsModal.attempts.length}</p>
+                                                                    <p className="text-lg font-bold text-blue-700 dark:text-blue-300">{scopedAttempts.length}</p>
                                                                     <p className="text-xs text-blue-600 dark:text-blue-400">Đã nộp</p>
                                                                 </div>
                                                                 <div className="text-center px-3 py-2 rounded-xl bg-green-50 dark:bg-green-900/20">
                                                                     <p className="text-lg font-bold text-green-700 dark:text-green-300">
-                                                                        {Math.round(quizResultsModal.attempts.reduce((s, a) => s + a.score, 0) / quizResultsModal.attempts.length)}
+                                                                        {Math.round(scopedAttempts.reduce((s, a) => s + a.score, 0) / scopedAttempts.length)}
                                                                     </p>
                                                                     <p className="text-xs text-green-600 dark:text-green-400">Điểm TB</p>
                                                                 </div>
                                                                 <div className="text-center px-3 py-2 rounded-xl bg-violet-50 dark:bg-violet-900/20">
                                                                     <p className="text-lg font-bold text-violet-700 dark:text-violet-300">
-                                                                        {quizResultsModal.attempts.filter((a) => a.score >= 80).length}
+                                                                        {scopedAttempts.filter((a) => a.score >= 80).length}
                                                                     </p>
                                                                     <p className="text-xs text-violet-600 dark:text-violet-400">Đạt ≥80</p>
                                                                 </div>
                                                             </div>
-                                                            {quizResultsModal.attempts.map((att) => (
+                                                            {scopedAttempts.map((att) => (
                                                                 <div key={att.id} className="flex flex-col gap-3 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 dark:border-gray-700 dark:bg-gray-900/30 sm:flex-row sm:items-center sm:justify-between">
                                                                     <div className="flex items-center gap-3">
                                                                         <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white ${att.score >= 80 ? "bg-green-500" : att.score >= 50 ? "bg-yellow-500" : "bg-red-500"}`}>
                                                                             {att.personName?.[0] ?? "?"}
                                                                         </div>
                                                                         <div>
-                                                                            <p className="text-sm font-medium text-gray-900 dark:text-white">{att.personName ?? "Unknown"}</p>
+                                                                            <p className="text-sm font-medium text-gray-900 dark:text-white">
+                                                                                {att.personName ?? "Unknown"}
+                                                                            </p>
                                                                             <p className="text-xs text-gray-500 dark:text-gray-400">
                                                                                 {att.correctAnswers}/{att.totalQuestions} câu · {new Date(att.submittedAt).toLocaleDateString("vi-VN")}
                                                                             </p>

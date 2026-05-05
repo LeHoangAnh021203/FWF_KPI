@@ -124,7 +124,10 @@ export async function POST(request: Request, { params }: Params) {
     const { user } = await getAuthState(sessionUserId);
 
     if (!user) return NextResponse.json({ ok: false, message: "Unauthorized" }, { status: 401 });
-    const canManage = isAdminLikeRole(user.role) || user.role === "leader";
+    const canManage =
+      isAdminLikeRole(user.role) ||
+      (user.role === "leader" && user.department === "Vận hành") ||
+      (user.role === "store_trainer" && user.department === "Cửa hàng");
     if (!canManage) return NextResponse.json({ ok: false, message: "Forbidden" }, { status: 403 });
 
     const { questionCount } = (await request.json()) as { questionCount: number };

@@ -5,7 +5,9 @@ import {
   updateLearningQuiz,
   deleteLearningQuiz,
   getDocumentRealtimeAudience,
-  getAuthState
+  getAuthState,
+  getStoreLearningAnnouncementTargets,
+  sendStoreLearningAnnouncementEmails
 } from "@/lib/server/data";
 import { publishAppEventToPersons } from "@/lib/server/realtime";
 import { getSessionUserId } from "@/lib/server/session";
@@ -30,8 +32,13 @@ export async function POST(request: Request, { params }: Params) {
     const sessionUserId = await getSessionUserId();
     const body = await request.json();
     const quiz = await createLearningQuiz(sessionUserId, { ...body, documentId });
-    const [authState, audience] = await Promise.all([getAuthState(sessionUserId), getDocumentRealtimeAudience(documentId)]);
-    void publishAppEventToPersons(audience.personIds, {
+    const [authState, audience, trainerTargets] = await Promise.all([
+      getAuthState(sessionUserId),
+      getDocumentRealtimeAudience(documentId),
+      getStoreLearningAnnouncementTargets(sessionUserId, documentId)
+    ]);
+    const targetPersonIds = trainerTargets.personIds.length > 0 ? trainerTargets.personIds : audience.personIds;
+    void publishAppEventToPersons(targetPersonIds, {
       type: "learning.updated",
       actorId: authState.user?.personId ?? "system",
       action: "created",
@@ -39,6 +46,12 @@ export async function POST(request: Request, { params }: Params) {
       entityLabel: audience.documentName,
       entityId: quiz.id,
       occurredAt: new Date().toISOString()
+    });
+    void sendStoreLearningAnnouncementEmails({
+      actorName: authState.user?.name ?? "Trainer",
+      title: audience.documentName,
+      kind: "quiz",
+      targets: trainerTargets.emailTargets
     });
     return NextResponse.json({ ok: true, quiz });
   } catch (error) {
