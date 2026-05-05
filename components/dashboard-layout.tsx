@@ -3,7 +3,7 @@
 import type React from "react"
 import type { Route } from "next"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import { subscribeToPersonChannel } from "@/lib/client/realtime"
 import { Button } from "./ui/button"
@@ -43,6 +43,7 @@ import {
     ClipboardCheck,
     Menu,
     X as XIcon,
+    Upload,
 } from "lucide-react"
 
 type SidebarPath = "/" | "/dashboard" | "/projects" | "/people" | "/chats" | "/documents" | "/recipts" | "/tests"
@@ -66,7 +67,7 @@ type ApprovalRequest = {
     id: string
     email: string
     name: string
-    role: "admin" | "ceo" | "leader" | "employee" | "store_staff"
+    role: "admin" | "ceo" | "leader" | "employee" | "store_staff" | "store_trainer" | "store_manager" | "store_lead" | "store_technician"
     department: string
     createdAt: string
 }
@@ -76,7 +77,11 @@ const roleDisplayLabel: Record<ApprovalRequest["role"], string> = {
     ceo: "CEO",
     leader: "Leader",
     employee: "Nhân viên",
-    store_staff: "Nhân viên cửa hàng"
+    store_staff: "Nhân viên cửa hàng",
+    store_trainer: "Trainer",
+    store_manager: "Quản lí cửa hàng",
+    store_lead: "Cửa hàng trưởng",
+    store_technician: "Kỹ thuật viên"
 }
 
 type RealtimeNotification = {
@@ -142,6 +147,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const [isProjectSubmitting, setIsProjectSubmitting] = useState(false)
     const [isProfileDialogOpen, setIsProfileDialogOpen] = useState(false)
     const [isProfileSubmitting, setIsProfileSubmitting] = useState(false)
+    const [isAvatarUploading, setIsAvatarUploading] = useState(false)
     const [approvalRequests, setApprovalRequests] = useState<ApprovalRequest[]>([])
     const [notifications, setNotifications] = useState<RealtimeNotification[]>([])
     const [notificationTab, setNotificationTab] = useState<NotificationTab>("all")
@@ -152,6 +158,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const [approvalActionKey, setApprovalActionKey] = useState<string | null>(null)
     const [isSigningOut, setIsSigningOut] = useState(false)
     const [isSidebarOpen, setIsSidebarOpen] = useState(false)
+    const avatarFileInputRef = useRef<HTMLInputElement | null>(null)
     const selectedProjectId = searchParams.get("projectId")
     const isAdminUser = isAdminLikeRole(user?.role)
     const todayLabel = useMemo(
@@ -513,6 +520,50 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             })
         } finally {
             setIsProfileSubmitting(false)
+        }
+    }
+
+    const handleAvatarFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0]
+        if (!file) return
+
+        if (!file.type.startsWith("image/")) {
+            toast({
+                title: "File không hợp lệ",
+                description: "Vui lòng chọn file ảnh.",
+                variant: "destructive",
+            })
+            event.target.value = ""
+            return
+        }
+
+        setIsAvatarUploading(true)
+        try {
+            const formData = new FormData()
+            formData.append("file", file)
+            const response = await fetch("/api/profile/avatar-upload", {
+                method: "POST",
+                body: formData,
+                credentials: "include",
+            })
+            const payload = (await response.json()) as { ok: boolean; url?: string; message?: string }
+            if (!response.ok || !payload.ok || !payload.url) {
+                throw new Error(payload.message || "Không thể upload ảnh đại diện.")
+            }
+            updateProfileForm("imageURL", payload.url)
+            toast({
+                title: "Upload ảnh thành công",
+                description: "Ảnh đại diện đã được chọn. Nhấn \"Lưu thay đổi\" để cập nhật hồ sơ.",
+            })
+        } catch (error) {
+            toast({
+                title: "Upload ảnh thất bại",
+                description: error instanceof Error ? error.message : "Không thể upload ảnh đại diện.",
+                variant: "destructive",
+            })
+        } finally {
+            setIsAvatarUploading(false)
+            event.target.value = ""
         }
     }
 
@@ -1048,6 +1099,25 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                         <div className="grid gap-2">
                             <Label htmlFor="profile-image">Avatar URL</Label>
                             <Input id="profile-image" value={profileForm.imageURL} onChange={(event) => updateProfileForm("imageURL", event.target.value)} placeholder="https://..." />
+                            <div className="flex items-center gap-2">
+                                <input
+                                    ref={avatarFileInputRef}
+                                    type="file"
+                                    accept="image/png,image/jpeg,image/webp,image/gif"
+                                    className="hidden"
+                                    onChange={handleAvatarFileSelect}
+                                />
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => avatarFileInputRef.current?.click()}
+                                    disabled={isAvatarUploading || isProfileSubmitting}
+                                >
+                                    <Upload className="mr-2 h-4 w-4" />
+                                    {isAvatarUploading ? "Đang upload..." : "Chọn ảnh từ máy"}
+                                </Button>
+                            </div>
                         </div>
                         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                             <div className="grid gap-2">
