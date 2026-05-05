@@ -4,17 +4,21 @@ import { randomInt } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { getMongoDb } from "@/lib/mongodb";
 import {
+  canManageStoreRole,
   isAdminLikeRole,
+  isStoreRole,
   requiresApprovalRole,
   type Department,
   type UserAccount,
   type UserRole
 } from "@/lib/auth";
+import { STORE_BRANCH_ID_SET, STORE_REGIONS, type StoreRegion } from "@/lib/store-branches";
 import type { Document, Folder } from "@/lib/documents";
 import { personDisplayRoles, teams as companyTeams, type Person } from "@/lib/people";
 import type { Project, Task, TaskAttachment, TaskGroups, TimePeriod } from "@/components/workspace-context";
 import {
   isOtpEmailConfigured,
+  sendLearningAnnouncementEmail,
   sendOtpEmail,
   sendRoleApprovalGrantedEmail,
   sendRoleApprovalRejectedEmail,
@@ -30,12 +34,15 @@ type DbUser = {
   personId?: string | null;
   role: StoredUserRole;
   department: Department;
+  storeRegion?: StoreRegion;
+  storeBranchIds?: number[];
+  storeLeadUserId?: string;
   verified: boolean;
   createdAt?: string;
   updatedAt?: string;
 };
 
-type StoredUserRole = UserRole | "boss" | "manager" | "store_staff";
+type StoredUserRole = UserRole | "boss" | "manager";
 
 type DbPerson = {
   _id: string;
@@ -241,6 +248,9 @@ type PendingRegistration = {
   name: string;
   role: UserRole;
   department: Department;
+  storeRegion?: StoreRegion;
+  storeBranchIds?: number[];
+  storeLeadUserId?: string;
   otp: string;
   expiresAt: string;
   createdAt: string;
@@ -260,6 +270,9 @@ type DbRoleApprovalRequest = {
   name: string;
   role: UserRole;
   department: Department;
+  storeRegion?: StoreRegion;
+  storeBranchIds?: number[];
+  storeLeadUserId?: string;
   status: "pending" | "approved" | "rejected";
   approverUserId?: string;
   otpVerifiedAt: string;
@@ -276,6 +289,67 @@ type SessionActor = {
   isLeader: boolean;
   isAdmin: boolean;
 };
+
+function getManagedPersonIdsByHierarchy(
+  actorUser: UserAccount,
+  actorPerson: Person,
+  allPeople: Person[],
+  userByPersonId: Map<string, UserAccount>
+) {
+  const managed = new Set<string>();
+  managed.add(actorPerson.id);
+
+  if (isAdminLikeRole(actorUser.role)) {
+    allPeople.forEach((person) => managed.add(person.id));
+    return managed;
+  }
+
+  const actorRole = actorUser.role;
+  const actorIsStoreRole = isStoreRole(actorRole);
+  const actorBranches = new Set(actorUser.storeBranchIds ?? []);
+
+  for (const candidate of allPeople) {
+    const candidateUser = userByPersonId.get(candidate.id);
+    if (!candidateUser) continue;
+    if (candidate.id === actorPerson.id) continue;
+
+    if (actorUser.role === "leader") {
+      if (candidate.team === actorPerson.team) managed.add(candidate.id);
+      if (actorPerson.team === "product" && candidate.team === "store") managed.add(candidate.id);
+      continue;
+    }
+
+    if (!actorIsStoreRole) {
+      if (candidate.team === actorPerson.team) managed.add(candidate.id);
+      continue;
+    }
+
+    if (candidateUser.department !== "Cửa hàng") continue;
+    if (!isStoreRole(candidateUser.role)) continue;
+
+    if (!canManageStoreRole(actorRole, candidateUser.role)) continue;
+
+    if (actorRole === "store_trainer") {
+      managed.add(candidate.id);
+      continue;
+    }
+
+    if (actorRole === "store_manager") {
+      const candidateBranches = candidateUser.storeBranchIds ?? [];
+      const hasOverlap = candidateBranches.some((branchId) => actorBranches.has(branchId));
+      if (hasOverlap) managed.add(candidate.id);
+      continue;
+    }
+
+    if (actorRole === "store_lead") {
+      if (candidateUser.role === "store_technician" && candidateUser.storeLeadUserId === actorUser.id) {
+        managed.add(candidate.id);
+      }
+    }
+  }
+
+  return managed;
+}
 
 export type CompanyTeamRecord = {
   id: string;
@@ -396,6 +470,7 @@ export type QuizAttemptRecord = {
   documentId: string;
   personId: string;
   personName?: string;
+  personRole?: string;
   answers: number[];
   score: number;
   correctAnswers: number;
@@ -421,6 +496,7 @@ export type LearningProgressRecord = {
 export type TeamLearningStatusRow = {
   personId: string;
   personName: string;
+  personRole?: string;
   team: string;
   status: "completed" | "in_progress" | "not_started";
 };
@@ -466,6 +542,24 @@ function normalizePersonDisplayRole(role: string) {
     case "nhan vien cua hang":
     case "nhân viên cửa hàng":
       return "Nhân viên cửa hàng";
+    case "ky thuat vien":
+    case "kỹ thuật viên":
+    case "store_technician":
+    case "technician":
+      return "Kỹ thuật viên";
+    case "cua hang truong":
+    case "cửa hàng trưởng":
+    case "store_lead":
+      return "Cửa hàng trưởng";
+    case "quan li cua hang":
+    case "quản lí cửa hàng":
+    case "quan ly cua hang":
+    case "quản lý cửa hàng":
+    case "store_manager":
+      return "Quản lí cửa hàng";
+    case "trainer":
+    case "store_trainer":
+      return "Trainer";
     case "leader":
     case "lead":
     case "manager":
@@ -479,6 +573,15 @@ function normalizePersonDisplayRole(role: string) {
     default:
       return role.trim();
   }
+}
+
+function isStoreTrainerActor(actor: SessionActor) {
+  return actor.user.role === "store_trainer" && actor.user.department === "Cửa hàng";
+}
+
+function canStoreTrainerManageDisplayRole(role: string) {
+  const normalized = normalizePersonDisplayRole(role);
+  return normalized === "Quản lí cửa hàng" || normalized === "Cửa hàng trưởng" || normalized === "Kỹ thuật viên" || normalized === "Nhân viên cửa hàng";
 }
 
 function normalizeTeamId(teamId: string) {
@@ -547,7 +650,8 @@ async function syncCompanyDirectory(db: Awaited<ReturnType<typeof getMongoDb>>) 
       const departmentDrivenTeamId =
         matchedUsers[0] ? mapDepartmentToTeamId(matchedUsers[0].department) : null;
       const nextTeamId = departmentDrivenTeamId ?? normalizeTeamId(person.teamId);
-      const nextRole = normalizePersonDisplayRole(person.role);
+      const roleDrivenByUser = matchedUsers[0] ? normalizePersonDisplayRole(matchedUsers[0].role) : null;
+      const nextRole = roleDrivenByUser ?? normalizePersonDisplayRole(person.role);
 
       if (nextTeamId !== person.teamId || nextRole !== person.role) {
         await db.collection<DbPerson>("people").updateOne(
@@ -720,6 +824,9 @@ function mapDbUser(user: DbUser): UserAccount {
     personId: user.personId ?? undefined,
     role: normalizedRole,
     department: user.department,
+    storeRegion: user.storeRegion,
+    storeBranchIds: user.storeBranchIds ?? [],
+    storeLeadUserId: user.storeLeadUserId,
     verified: user.verified
   };
 }
@@ -735,6 +842,22 @@ function mapRequestedRoleToDisplayRole(role: UserRole) {
 
   if (role === "admin") {
     return "Admin";
+  }
+
+  if (role === "store_trainer") {
+    return "Trainer";
+  }
+
+  if (role === "store_manager") {
+    return "Quản lí cửa hàng";
+  }
+
+  if (role === "store_lead") {
+    return "Cửa hàng trưởng";
+  }
+
+  if (role === "store_technician" || role === "store_staff") {
+    return "Kỹ thuật viên";
   }
 
   return "Nhân viên";
@@ -810,12 +933,11 @@ async function getRootApprover(db: Awaited<ReturnType<typeof getMongoDb>>) {
 
 async function createApprovedUserFromRequest(
   db: Awaited<ReturnType<typeof getMongoDb>>,
-  request: Pick<DbRoleApprovalRequest, "name" | "email" | "role" | "department">
+  request: Pick<DbRoleApprovalRequest, "name" | "email" | "role" | "department" | "storeRegion" | "storeBranchIds" | "storeLeadUserId">
 ) {
-  const existingUserCount = await db.collection<DbUser>("users").countDocuments();
-  const nextUserId = `u-generated-${existingUserCount + 1}`;
   const now = new Date().toISOString();
   const normalizedEmail = normalizeEmail(request.email);
+  const nextUserId = await generateUniqueUserId(db);
   const existingPerson = await db.collection<DbPerson>("people").findOne({ email: normalizedEmail });
   let personId = existingPerson?._id ?? null;
 
@@ -833,6 +955,17 @@ async function createApprovedUserFromRequest(
     });
   }
 
+  let resolvedStoreRegion = request.storeRegion;
+  let resolvedStoreBranchIds = request.storeBranchIds ?? [];
+
+  if (request.department === "Cửa hàng" && request.role === "store_technician" && request.storeLeadUserId) {
+    const leadUser = await db.collection<DbUser>("users").findOne({ _id: request.storeLeadUserId, verified: true });
+    if (leadUser?.storeRegion && (leadUser.storeBranchIds?.length ?? 0) > 0) {
+      resolvedStoreRegion = leadUser.storeRegion;
+      resolvedStoreBranchIds = leadUser.storeBranchIds ?? [];
+    }
+  }
+
   const newUser: DbUser = {
     _id: nextUserId,
     name: request.name,
@@ -841,6 +974,9 @@ async function createApprovedUserFromRequest(
     personId,
     role: request.role,
     department: request.department,
+    storeRegion: resolvedStoreRegion,
+    storeBranchIds: resolvedStoreBranchIds,
+    storeLeadUserId: request.storeLeadUserId,
     verified: true,
     createdAt: now,
     updatedAt: now
@@ -848,6 +984,19 @@ async function createApprovedUserFromRequest(
 
   await db.collection<DbUser>("users").insertOne(newUser);
   return newUser;
+}
+
+async function generateUniqueUserId(db: Awaited<ReturnType<typeof getMongoDb>>) {
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const candidateId = `u-generated-${Date.now()}-${randomInt(1000, 9999)}`;
+    const exists = await db.collection<DbUser>("users").findOne(
+      { _id: candidateId },
+      { projection: { _id: 1 } }
+    );
+    if (!exists) return candidateId;
+  }
+
+  throw new Error("Không thể tạo ID người dùng duy nhất. Vui lòng thử lại.");
 }
 
 function normalizeUserRole(role: StoredUserRole): UserRole {
@@ -958,13 +1107,19 @@ function mapDbLearningQuiz(quiz: DbLearningQuiz, sanitize: boolean): LearningQui
   };
 }
 
-function mapDbQuizAttempt(attempt: DbQuizAttempt, personName?: string, reviewQuestions?: QuizQuestion[]): QuizAttemptRecord {
+function mapDbQuizAttempt(
+  attempt: DbQuizAttempt,
+  personName?: string,
+  personRole?: string,
+  reviewQuestions?: QuizQuestion[]
+): QuizAttemptRecord {
   return {
     id: attempt._id,
     quizId: attempt.quizId,
     documentId: attempt.documentId,
     personId: attempt.personId,
     personName,
+    personRole,
     answers: attempt.answers,
     score: attempt.score,
     correctAnswers: attempt.correctAnswers,
@@ -1154,6 +1309,7 @@ export async function getDocumentRealtimeAudience(documentId: string) {
       const person = personById.get(personId);
       if (!person) return false;
       if (isAdminLikeRole(user.role)) return true;
+      if (ownerTeam && person.team !== ownerTeam) return false;
 
       const isLeader = user.role === "leader";
       const isVanHanhLeader = isLeader && person.team === "product";
@@ -1187,6 +1343,81 @@ export async function getDocumentRealtimeAudience(documentId: string) {
   };
 }
 
+export async function getStoreLearningAnnouncementTargets(
+  sessionUserId: string | null | undefined,
+  documentId: string
+) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) {
+    throw new Error("Unauthorized");
+  }
+
+  if (!(actor.user.role === "store_trainer" && actor.user.department === "Cửa hàng")) {
+    return { personIds: [] as string[], emailTargets: [] as Array<{ email: string; name: string }>, documentName: "" };
+  }
+
+  const db = await getMongoDb();
+  const [document, allPeople, allUsers] = await Promise.all([
+    db.collection<DbDocument>("documents").findOne({ _id: documentId }),
+    db.collection<DbPerson>("people").find({}).toArray(),
+    db.collection<DbUser>("users").find({ verified: true }).toArray()
+  ]);
+  if (!document) {
+    return { personIds: [] as string[], emailTargets: [] as Array<{ email: string; name: string }>, documentName: "" };
+  }
+
+  const mappedPeople = allPeople.map(mapDbPerson);
+  const ownerTeamByPersonId = new Map(mappedPeople.map((person) => [person.id, person.team]));
+  const allowedRoles = new Set<UserRole>(["store_manager", "store_lead", "store_technician", "store_staff"]);
+
+  const recipients = allUsers
+    .map(mapDbUser)
+    .filter((user) => Boolean(user.personId))
+    .filter((user) => user.department === "Cửa hàng" && allowedRoles.has(user.role))
+    .filter((user) => {
+      const person = mappedPeople.find((candidate) => candidate.id === user.personId);
+      if (!person) return false;
+      return canPersonAccessDocument(person, document, ownerTeamByPersonId);
+    });
+
+  const personIds = recipients
+    .map((user) => user.personId as string)
+    .filter((personId) => personId !== actor.person.id);
+
+  const emailTargets = recipients
+    .filter((user) => normalizeEmail(user.email) !== normalizeEmail(actor.user.email))
+    .map((user) => ({ email: user.email, name: user.name }));
+
+  return {
+    personIds: Array.from(new Set(personIds)),
+    emailTargets,
+    documentName: document.name
+  };
+}
+
+export async function sendStoreLearningAnnouncementEmails(input: {
+  actorName: string;
+  title: string;
+  kind: "document" | "quiz";
+  targets: Array<{ email: string; name: string }>;
+}) {
+  if (!isOtpEmailConfigured() || input.targets.length === 0) {
+    return;
+  }
+
+  await Promise.allSettled(
+    input.targets.map((target) =>
+      sendLearningAnnouncementEmail({
+        to: target.email,
+        recipientName: target.name,
+        actorName: input.actorName,
+        title: input.title,
+        kind: input.kind
+      })
+    )
+  );
+}
+
 async function getSessionActor(sessionUserId?: string | null): Promise<SessionActor | null> {
   if (!sessionUserId) {
     return null;
@@ -1206,7 +1437,8 @@ async function getSessionActor(sessionUserId?: string | null): Promise<SessionAc
 
   const user = mapDbUser(userDocument);
   const people = peopleDocuments.map(mapDbPerson);
-  const usersByEmail = new Map(userDocuments.map((candidate) => [normalizeEmail(candidate.email), mapDbUser(candidate)]));
+  const mappedUsers = userDocuments.map(mapDbUser);
+  const usersByEmail = new Map(mappedUsers.map((candidate) => [normalizeEmail(candidate.email), candidate]));
   const person = findPersonForUser(user, people);
   const isAdmin = isAdminLikeRole(user.role);
   const adminVisiblePersonIds = new Set(
@@ -1234,16 +1466,20 @@ async function getSessionActor(sessionUserId?: string | null): Promise<SessionAc
     };
 
   const isLeader =
-    isAdmin || user.role === "leader" || actorPerson.role.toLowerCase() === "leader";
-  const teamMembers = isAdmin
-    ? people
-    : people.filter((candidate) => {
-        if (adminVisiblePersonIds.has(candidate.id)) return true;
-        if (candidate.team === actorPerson.team) return true;
-        // Leader Vận hành thấy được cả nhân viên cửa hàng
-        if (isLeader && actorPerson.team === "product" && candidate.team === "store") return true;
-        return false;
-      });
+    isAdmin ||
+    user.role === "leader" ||
+    user.role === "store_trainer" ||
+    user.role === "store_manager" ||
+    user.role === "store_lead" ||
+    actorPerson.role.toLowerCase() === "leader";
+
+  const userByPersonId = new Map<string, UserAccount>(
+    mappedUsers
+      .filter((candidate) => Boolean(candidate.personId))
+      .map((candidate) => [candidate.personId as string, candidate])
+  );
+  const managedPersonIds = getManagedPersonIdsByHierarchy(user, actorPerson, people, userByPersonId);
+  const teamMembers = people.filter((candidate) => managedPersonIds.has(candidate.id) || adminVisiblePersonIds.has(candidate.id));
 
   return {
     user,
@@ -1279,11 +1515,29 @@ function canManageSchedules(actor: SessionActor) {
 }
 
 function canManageTests(actor: SessionActor) {
-  return actor.user.role === "leader" && actor.user.department === "Vận hành";
+  if (actor.isAdmin) return true;
+  if (actor.user.role === "leader" && actor.user.department === "Vận hành") return true;
+  return actor.user.role === "store_trainer" && actor.user.department === "Cửa hàng";
 }
 
 function canManageLearningContent(actor: SessionActor) {
-  return actor.isLeader || actor.isAdmin;
+  if (actor.isAdmin) return true;
+  if (actor.user.role === "leader" && actor.user.department === "Vận hành") return true;
+  return actor.user.role === "store_trainer" && actor.user.department === "Cửa hàng";
+}
+
+function canViewTeamLearningReports(actor: SessionActor) {
+  if (canManageLearningContent(actor)) return true;
+  return (
+    actor.user.department === "Cửa hàng" &&
+    (actor.user.role === "store_manager" || actor.user.role === "store_lead")
+  );
+}
+
+function canCreateDocuments(actor: SessionActor) {
+  if (actor.isAdmin) return true;
+  if (actor.user.role === "leader") return true;
+  return actor.user.role === "store_trainer" && actor.user.department === "Cửa hàng";
 }
 
 function isStorePerson(person: Person) {
@@ -1300,7 +1554,8 @@ function isEmployeePerson(person: Person) {
   return (
     !normalizedRole.includes("leader") &&
     !normalizedRole.includes("admin") &&
-    !normalizedRole.includes("ceo")
+    !normalizedRole.includes("ceo") &&
+    !normalizedRole.includes("trainer")
   );
 }
 
@@ -1309,6 +1564,11 @@ function canPersonAccessDocument(
   document: DbDocument,
   ownerTeamByPersonId: Map<string, string>
 ) {
+  const ownerTeam = ownerTeamByPersonId.get(document.ownerId);
+  if (ownerTeam && person.team !== ownerTeam) {
+    return false;
+  }
+
   if (document.visibility === "specific") {
     return (document.visibleToPersonIds ?? []).includes(person.id);
   }
@@ -1318,7 +1578,6 @@ function canPersonAccessDocument(
   if (document.visibility === "office") {
     return !isStorePerson(person);
   }
-  const ownerTeam = ownerTeamByPersonId.get(document.ownerId);
   if (!ownerTeam) return true;
   return person.team === ownerTeam;
 }
@@ -1407,6 +1666,9 @@ export async function createRegistrationOtp(input: {
   email: string;
   role: UserRole;
   department: Department;
+  storeRegion?: string;
+  storeBranchIds?: number[];
+  storeLeadUserId?: string;
 }) {
   const db = await getMongoDb();
   const normalizedEmail = normalizeEmail(input.email);
@@ -1424,6 +1686,56 @@ export async function createRegistrationOtp(input: {
     return { ok: false, message: "Tài khoản này đang chờ admin gốc duyệt." };
   }
 
+  const normalizedStoreRegion = input.storeRegion as StoreRegion | undefined;
+  const normalizedStoreBranchIds = Array.from(
+    new Set((input.storeBranchIds ?? []).map((value) => Number(value)).filter(Number.isFinite))
+  );
+  const normalizedStoreLeadUserId = input.storeLeadUserId?.trim() ?? "";
+
+  if (input.department === "Cửa hàng") {
+    const allowedStoreRoles = new Set<UserRole>(["store_trainer", "store_manager", "store_lead", "store_technician"]);
+    if (!allowedStoreRoles.has(input.role)) {
+      return { ok: false, message: "Phòng ban Cửa hàng chỉ cho phép 4 role: Trainer, Quản lí cửa hàng, Cửa hàng trưởng, Kỹ thuật viên." };
+    }
+    if (input.role === "store_technician") {
+      if (!normalizedStoreLeadUserId) {
+        return { ok: false, message: "Vui lòng chọn Cửa hàng trưởng quản lý." };
+      }
+      const leadUser = await db.collection<DbUser>("users").findOne({ _id: normalizedStoreLeadUserId, verified: true });
+      if (!leadUser || normalizeUserRole(leadUser.role) !== "store_lead" || leadUser.department !== "Cửa hàng") {
+        return { ok: false, message: "Cửa hàng trưởng đã chọn không hợp lệ." };
+      }
+      if (!leadUser.storeRegion || !leadUser.storeBranchIds || leadUser.storeBranchIds.length === 0) {
+        return { ok: false, message: "Cửa hàng trưởng chưa có cấu hình khu vực/chi nhánh." };
+      }
+    } else if (input.role !== "store_trainer") {
+      if (!normalizedStoreRegion || !(STORE_REGIONS as readonly string[]).includes(normalizedStoreRegion)) {
+        return { ok: false, message: "Vui lòng chọn khu vực hợp lệ." };
+      }
+      if (normalizedStoreBranchIds.length === 0) {
+        return { ok: false, message: "Vui lòng chọn ít nhất 1 chi nhánh." };
+      }
+      if (!normalizedStoreBranchIds.every((branchId) => STORE_BRANCH_ID_SET.has(branchId))) {
+        return { ok: false, message: "Danh sách chi nhánh không hợp lệ." };
+      }
+      if (input.role === "store_manager" && normalizedStoreBranchIds.length > 5) {
+        return { ok: false, message: "Quản lí cửa hàng chỉ được chọn tối đa 5 chi nhánh." };
+      }
+      if (input.role !== "store_manager" && normalizedStoreBranchIds.length !== 1) {
+        return { ok: false, message: "Role này chỉ được chọn đúng 1 chi nhánh." };
+      }
+    } else {
+      // Trainer manages all store hierarchy across all branches/regions, no branch/region selection required.
+    }
+  } else if (
+    input.role === "store_trainer" ||
+    input.role === "store_manager" ||
+    input.role === "store_lead" ||
+    input.role === "store_technician"
+  ) {
+    return { ok: false, message: "Role cửa hàng chỉ áp dụng cho phòng ban Cửa hàng." };
+  }
+
   const otp = `${randomInt(100000, 1000000)}`;
   const now = new Date();
   const payload: PendingRegistration = {
@@ -1431,6 +1743,15 @@ export async function createRegistrationOtp(input: {
     name: input.name.trim(),
     role: input.role,
     department: input.department,
+    storeRegion:
+      input.department === "Cửa hàng" && input.role !== "store_technician" && input.role !== "store_trainer"
+        ? normalizedStoreRegion
+        : undefined,
+    storeBranchIds:
+      input.department === "Cửa hàng" && input.role !== "store_technician" && input.role !== "store_trainer"
+        ? normalizedStoreBranchIds
+        : undefined,
+    storeLeadUserId: input.department === "Cửa hàng" && input.role === "store_technician" ? normalizedStoreLeadUserId : undefined,
     otp,
     expiresAt: new Date(now.getTime() + 5 * 60 * 1000).toISOString(),
     createdAt: now.toISOString()
@@ -1492,6 +1813,9 @@ export async function verifyRegistrationOtp(email: string, otp: string) {
       name: pending.name,
       role: pending.role,
       department: pending.department,
+      storeRegion: pending.storeRegion,
+      storeBranchIds: pending.storeBranchIds,
+      storeLeadUserId: pending.storeLeadUserId,
       status: "pending",
       approverUserId: rootApprover?._id,
       otpVerifiedAt: now,
@@ -1612,11 +1936,24 @@ async function requireAdminActor(sessionUserId?: string | null) {
   return actor;
 }
 
+async function requirePeopleManagerActor(sessionUserId?: string | null) {
+  const actor = await getSessionActor(sessionUserId);
+  if (!actor) {
+    throw new Error("Unauthorized");
+  }
+
+  if (actor.isAdmin || isStoreTrainerActor(actor)) {
+    return actor;
+  }
+
+  throw new Error("Forbidden");
+}
+
 export async function createPersonRecord(
   sessionUserId: string | null | undefined,
   input: PersonMutationInput
 ) {
-  await requireAdminActor(sessionUserId);
+  const actor = await requirePeopleManagerActor(sessionUserId);
 
   const db = await getMongoDb();
   await ensureCompanyDirectorySynced(db);
@@ -1635,6 +1972,15 @@ export async function createPersonRecord(
   const team = await db.collection<DbCompanyTeam>("company_teams").findOne({ _id: input.team });
   if (!team) {
     throw new Error("Phòng ban không tồn tại.");
+  }
+
+  if (isStoreTrainerActor(actor)) {
+    if (input.team !== "store") {
+      throw new Error("Trainer chỉ được thêm nhân sự phòng ban Cửa hàng.");
+    }
+    if (!canStoreTrainerManageDisplayRole(normalizedRole)) {
+      throw new Error("Trainer chỉ được thêm Quản lí cửa hàng, Cửa hàng trưởng hoặc Kỹ thuật viên.");
+    }
   }
 
   const personId = `people_generated_${Date.now()}`;
@@ -1674,7 +2020,7 @@ export async function updatePersonRecord(
   personId: string,
   updates: PersonMutationInput
 ) {
-  await requireAdminActor(sessionUserId);
+  const actor = await requirePeopleManagerActor(sessionUserId);
 
   const db = await getMongoDb();
   await ensureCompanyDirectorySynced(db);
@@ -1701,6 +2047,18 @@ export async function updatePersonRecord(
   const nextTeam = await db.collection<DbCompanyTeam>("company_teams").findOne({ _id: updates.team });
   if (!nextTeam) {
     throw new Error("Phòng ban không tồn tại.");
+  }
+
+  if (isStoreTrainerActor(actor)) {
+    if (!canAccessPerson(actor, personId)) {
+      throw new Error("Forbidden");
+    }
+    if (existingPerson.teamId !== "store" || updates.team !== "store") {
+      throw new Error("Trainer chỉ được chỉnh nhân sự phòng ban Cửa hàng.");
+    }
+    if (!canStoreTrainerManageDisplayRole(normalizedRole)) {
+      throw new Error("Trainer chỉ được chỉnh role Quản lí cửa hàng, Cửa hàng trưởng hoặc Kỹ thuật viên.");
+    }
   }
 
   const nextPayload: Partial<DbPerson> = {
@@ -2033,12 +2391,24 @@ export async function deletePersonRecord(
   sessionUserId: string | null | undefined,
   personId: string
 ) {
-  await requireAdminActor(sessionUserId);
+  const actor = await requirePeopleManagerActor(sessionUserId);
 
   const db = await getMongoDb();
   const existingPerson = await db.collection<DbPerson>("people").findOne({ _id: personId });
   if (!existingPerson) {
     return false;
+  }
+
+  if (isStoreTrainerActor(actor)) {
+    if (!canAccessPerson(actor, personId)) {
+      throw new Error("Forbidden");
+    }
+    if (existingPerson.teamId !== "store") {
+      throw new Error("Trainer chỉ được xóa nhân sự phòng ban Cửa hàng.");
+    }
+    if (!canStoreTrainerManageDisplayRole(existingPerson.role)) {
+      throw new Error("Trainer không thể xóa role này.");
+    }
   }
 
   await db.collection<DbPerson>("people").deleteOne({ _id: personId });
@@ -2540,6 +2910,7 @@ export async function getDocumentsData(sessionUserId?: string | null, folderId?:
 
       const visibility = doc.visibility ?? "team";
       const ownerTeam = personTeamMap.get(doc.ownerId);
+      if (ownerTeam && actor.person.team !== ownerTeam) return false;
       const ownerRoles = personRolesMap.get(doc.ownerId);
       const ownerIsLeaderCreator =
         Boolean(ownerRoles?.has("leader")) &&
@@ -2581,7 +2952,7 @@ export async function createDocumentRecord(
 ) {
   const actor = await getSessionActor(sessionUserId);
   if (!actor) throw new Error("Unauthorized");
-  if (!actor.isLeader) throw new Error("Forbidden");
+  if (!canCreateDocuments(actor)) throw new Error("Forbidden");
   const isAdminActor = actor.user.role === "admin" || actor.user.role === "ceo";
   const db = await getMongoDb();
 
@@ -2709,7 +3080,7 @@ export async function createFolderRecord(
 ) {
   const actor = await getSessionActor(sessionUserId);
   if (!actor) throw new Error("Unauthorized");
-  if (!actor.isLeader && !actor.isAdmin) throw new Error("Forbidden");
+  if (!canCreateDocuments(actor)) throw new Error("Forbidden");
 
   const now = new Date().toISOString();
   const folder: DbFolder = {
@@ -2729,7 +3100,7 @@ export async function createFolderRecord(
 export async function deleteFolderRecord(sessionUserId: string | null | undefined, folderId: string) {
   const actor = await getSessionActor(sessionUserId);
   if (!actor) throw new Error("Unauthorized");
-  if (!actor.isLeader && !actor.isAdmin) throw new Error("Forbidden");
+  if (!canCreateDocuments(actor)) throw new Error("Forbidden");
 
   const db = await getMongoDb();
   const folder = await db.collection<DbFolder>("document_folders").findOne({ _id: folderId });
@@ -3037,6 +3408,7 @@ export async function submitQuizAttempt(
 ): Promise<QuizAttemptRecord> {
   const actor = await getSessionActor(sessionUserId);
   if (!actor) throw new Error("Unauthorized");
+  if (actor.user.role === "store_trainer") throw new Error("Forbidden");
 
   const db = await getMongoDb();
   const existingAttempt = await db.collection<DbQuizAttempt>("quiz_attempts").findOne({
@@ -3077,7 +3449,7 @@ export async function submitQuizAttempt(
     explanation: q.explanation,
   }));
 
-  return mapDbQuizAttempt(attempt, actor.person.name, reviewQuestions);
+  return mapDbQuizAttempt(attempt, actor.person.name, actor.person.role, reviewQuestions);
 }
 
 export async function getMyQuizAttempt(
@@ -3101,24 +3473,60 @@ export async function getTeamQuizAttempts(
 ): Promise<QuizAttemptRecord[]> {
   const actor = await getSessionActor(sessionUserId);
   if (!actor) throw new Error("Unauthorized");
-  if (!canManageLearningContent(actor)) throw new Error("Forbidden");
+  if (!canViewTeamLearningReports(actor)) throw new Error("Forbidden");
 
   const db = await getMongoDb();
-  const attempts = await db
-    .collection<DbQuizAttempt>("quiz_attempts")
-    .find({ documentId }, { sort: { submittedAt: -1 } })
-    .toArray();
+  const [document, attempts] = await Promise.all([
+    db.collection<DbDocument>("documents").findOne({ _id: documentId }),
+    db
+      .collection<DbQuizAttempt>("quiz_attempts")
+      .find({ documentId }, { sort: { submittedAt: -1 } })
+      .toArray(),
+  ]);
 
-  if (attempts.length === 0) return [];
+  if (!document || attempts.length === 0) return [];
 
   const personIds = [...new Set(attempts.map((a) => a.personId))];
   const people = await db
     .collection<DbPerson>("people")
     .find({ _id: { $in: personIds } })
     .toArray();
-  const personNameMap = new Map(people.map((p) => [p._id, p.name]));
+  const peopleById = new Map(people.map((person) => [person._id, mapDbPerson(person)]));
+  const ownerTeamByPersonId = new Map(
+    people.map((person) => [person._id, normalizeTeamId(person.teamId)])
+  );
+  const visibleTeamMemberIds = new Set(actor.teamMembers.map((member) => member.id));
+  const visibleAttempts = attempts.filter((attempt) => {
+    const person = peopleById.get(attempt.personId);
+    if (!person) return false;
+    if (!visibleTeamMemberIds.has(person.id)) return false;
+    if (!canPersonAccessDocument(person, document, ownerTeamByPersonId)) return false;
+    return !normalizeIdentityValue(person.role).includes("trainer");
+  });
 
-  return attempts.map((attempt) => mapDbQuizAttempt(attempt, personNameMap.get(attempt.personId) ?? "Unknown"));
+  const scopedAttempts =
+    actor.user.role === "store_lead"
+      ? visibleAttempts.filter((attempt) => {
+          const person = peopleById.get(attempt.personId);
+          if (!person) return false;
+          if (attempt.personId === actor.person.id) return true;
+          const normalizedRole = normalizeIdentityValue(person.role);
+          return (
+            normalizedRole.includes("kỹ thuật viên") ||
+            normalizedRole.includes("ky thuat vien") ||
+            normalizedRole.includes("nhân viên cửa hàng") ||
+            normalizedRole.includes("nhan vien cua hang")
+          );
+        })
+      : visibleAttempts;
+
+  return scopedAttempts.map((attempt) =>
+    mapDbQuizAttempt(
+      attempt,
+      peopleById.get(attempt.personId)?.name ?? "Unknown",
+      peopleById.get(attempt.personId)?.role
+    )
+  );
 }
 
 export async function getMyLearningProgress(
@@ -3161,7 +3569,10 @@ export async function upsertMyLearningProgress(
   const ownerTeamByPersonId = new Map(
     people.map((person) => [person._id, normalizeTeamId(person.teamId)])
   );
-  if (!canPersonAccessDocument(actor.person, document, ownerTeamByPersonId)) {
+  const canLearnViaPersonalVisibility = canPersonAccessDocument(actor.person, document, ownerTeamByPersonId);
+  const canLearnViaManagementScope =
+    canViewTeamLearningReports(actor) && canAccessPerson(actor, document.ownerId);
+  if (!canLearnViaPersonalVisibility && !canLearnViaManagementScope) {
     throw new Error("Forbidden");
   }
 
@@ -3209,7 +3620,7 @@ export async function getTeamLearningStatusesForDocument(
 ): Promise<TeamLearningStatusRow[]> {
   const actor = await getSessionActor(sessionUserId);
   if (!actor) throw new Error("Unauthorized");
-  if (!canManageLearningContent(actor)) throw new Error("Forbidden");
+  if (!canViewTeamLearningReports(actor)) throw new Error("Forbidden");
 
   const db = await getMongoDb();
   const [document, allPeople] = await Promise.all([
@@ -3226,6 +3637,7 @@ export async function getTeamLearningStatusesForDocument(
   const targetPeople = mappedPeople.filter((person) => {
     if (!visibleTeamMemberIds.has(person.id)) return false;
     if (!isEmployeePerson(person)) return false;
+    if (actor.user.role === "store_lead" && person.id === actor.person.id) return false;
     return canPersonAccessDocument(person, document, ownerTeamByPersonId);
   });
 
@@ -3259,6 +3671,7 @@ export async function getTeamLearningStatusesForDocument(
       return {
         personId: person.id,
         personName: person.name,
+        personRole: person.role,
         team: person.team,
         status: completed ? "completed" : hasStarted ? "in_progress" : "not_started",
       } satisfies TeamLearningStatusRow;

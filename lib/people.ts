@@ -14,7 +14,17 @@ export interface Person {
   team: string;
 }
 
-export const personDisplayRoles = ["Nhân viên", "Nhân viên cửa hàng", "Leader", "Admin", "CEO"] as const;
+export const personDisplayRoles = [
+  "Nhân viên",
+  "Nhân viên cửa hàng",
+  "Kỹ thuật viên",
+  "Cửa hàng trưởng",
+  "Quản lí cửa hàng",
+  "Trainer",
+  "Leader",
+  "Admin",
+  "CEO",
+] as const;
 
 export const teams = [
   {

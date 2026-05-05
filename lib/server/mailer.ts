@@ -192,3 +192,33 @@ export async function sendRoleApprovalRejectedEmail({
     `
   });
 }
+
+export async function sendLearningAnnouncementEmail({
+  to,
+  recipientName,
+  actorName,
+  title,
+  kind
+}: {
+  to: string;
+  recipientName: string;
+  actorName: string;
+  title: string;
+  kind: "document" | "quiz";
+}) {
+  const kindLabel = kind === "quiz" ? "bài kiểm tra" : "tài liệu";
+  await sendTransactionalEmail({
+    to,
+    subject: `FWF KPI - ${kindLabel} mới cho phòng ban Cửa hàng`,
+    text: `Xin chào ${recipientName}, ${actorName} vừa tạo ${kindLabel} mới: ${title}. Vui lòng đăng nhập ứng dụng để xem chi tiết.`,
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #111827;">
+        <h2 style="margin-bottom: 12px;">${kindLabel === "bài kiểm tra" ? "Bài kiểm tra mới" : "Tài liệu mới"}</h2>
+        <p>Xin chào ${recipientName},</p>
+        <p><strong>${actorName}</strong> vừa tạo ${kindLabel} mới cho phòng ban Cửa hàng:</p>
+        <p style="font-weight: 700; margin: 14px 0;">${title}</p>
+        <p>Vui lòng đăng nhập ứng dụng để xem và thực hiện.</p>
+      </div>
+    `
+  });
+}

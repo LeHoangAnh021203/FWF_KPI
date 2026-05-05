@@ -1,4 +1,15 @@
-export type UserRole = "ceo" | "leader" | "employee" | "admin" | "store_staff";
+export type UserRole =
+  | "ceo"
+  | "leader"
+  | "employee"
+  | "admin"
+  | "store_staff"
+  | "store_trainer"
+  | "store_manager"
+  | "store_lead"
+  | "store_technician";
+
+export type StoreRole = "store_trainer" | "store_manager" | "store_lead" | "store_technician";
 
 export type Department =
   | "Hành chính - Nhân sự"
@@ -17,6 +28,9 @@ export type UserAccount = {
   personId?: string;
   role: UserRole;
   department: Department;
+  storeRegion?: string;
+  storeBranchIds?: number[];
+  storeLeadUserId?: string;
   verified: boolean;
 };
 
@@ -32,7 +46,18 @@ export const departments: Department[] = [
   "Cửa hàng"
 ];
 
-export const registrationRoles: UserRole[] = ["employee", "store_staff", "leader", "ceo", "admin"];
+export const registrationRoles: UserRole[] = [
+  "employee",
+  "leader",
+  "ceo",
+  "admin",
+  "store_trainer",
+  "store_manager",
+  "store_lead",
+  "store_technician"
+];
+
+export const storeRegistrationRoles: StoreRole[] = ["store_trainer", "store_manager", "store_lead", "store_technician"];
 
 export function isAdminLikeRole(role: UserRole | null | undefined) {
   return role === "admin" || role === "ceo";
@@ -40,6 +65,25 @@ export function isAdminLikeRole(role: UserRole | null | undefined) {
 
 export function requiresApprovalRole(role: UserRole | null | undefined) {
   return role === "admin" || role === "ceo" || role === "leader";
+}
+
+const storeRoleRank: Record<StoreRole, number> = {
+  store_trainer: 4,
+  store_manager: 3,
+  store_lead: 2,
+  store_technician: 1
+};
+
+export function isStoreRole(role: UserRole | null | undefined): role is StoreRole {
+  return role === "store_trainer" || role === "store_manager" || role === "store_lead" || role === "store_technician";
+}
+
+export function canManageStoreRole(managerRole: UserRole | null | undefined, targetRole: UserRole | null | undefined) {
+  if (!isStoreRole(managerRole) || !isStoreRole(targetRole)) {
+    return false;
+  }
+
+  return storeRoleRank[managerRole] > storeRoleRank[targetRole];
 }
 
 export const seededUsers: UserAccount[] = [

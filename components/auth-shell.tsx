@@ -6,7 +6,8 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/components/auth-provider";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
-import { COMPANY_DOMAIN, departments, registrationRoles, type Department, type UserRole } from "@/lib/auth";
+import { COMPANY_DOMAIN, departments, registrationRoles, storeRegistrationRoles, type Department, type UserRole } from "@/lib/auth";
+import { STORE_BRANCHES_BY_REGION, STORE_REGIONS, type StoreRegion } from "@/lib/store-branches";
 
 type AuthMode = "login" | "register";
 type EmailMode = "company" | "external";
@@ -16,7 +17,11 @@ const roleLabels: Record<UserRole, string> = {
   ceo: "CEO",
   employee: "Nhân viên",
   leader: "Leader",
-  store_staff: "Nhân viên cửa hàng"
+  store_staff: "Nhân viên cửa hàng",
+  store_trainer: "Trainer",
+  store_manager: "Quản lí cửa hàng",
+  store_lead: "Cửa hàng trưởng",
+  store_technician: "Kỹ thuật viên"
 };
 
 type FieldProps = {
@@ -117,6 +122,9 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
   const [emailMode, setEmailMode] = useState<EmailMode>("company");
   const [department, setDepartment] = useState<Department>("IT");
   const [role, setRole] = useState<UserRole>("employee");
+  const [storeRegion, setStoreRegion] = useState<StoreRegion>("Hồ Chí Minh");
+  const [storeBranchIds, setStoreBranchIds] = useState<number[]>([]);
+  const [storeLeadUserId, setStoreLeadUserId] = useState("");
   const [otp, setOtp] = useState("");
   const [otpPreview, setOtpPreview] = useState("");
   const [loginStep, setLoginStep] = useState<"form" | "otp">("form");
@@ -127,17 +135,37 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const availableRoles = useMemo(() => {
-    if (department === "Cửa hàng") return registrationRoles.filter((r) => r === "store_staff");
-    return registrationRoles.filter((r) => r !== "store_staff");
+    if (department === "Cửa hàng") return storeRegistrationRoles;
+    return registrationRoles.filter((r) => !storeRegistrationRoles.includes(r as typeof storeRegistrationRoles[number]));
   }, [department]);
 
   useEffect(() => {
-    if (department === "Cửa hàng" && role !== "store_staff") {
-      setRole("store_staff");
-    } else if (department !== "Cửa hàng" && role === "store_staff") {
+    if (department === "Cửa hàng" && !storeRegistrationRoles.includes(role as typeof storeRegistrationRoles[number])) {
+      setRole("store_technician");
+    } else if (department !== "Cửa hàng" && storeRegistrationRoles.includes(role as typeof storeRegistrationRoles[number])) {
       setRole("employee");
     }
   }, [department, role]);
+
+  useEffect(() => {
+    if (role !== "store_technician") {
+      setStoreLeadUserId("");
+    }
+  }, [role]);
+
+  const regionBranches = useMemo(() => STORE_BRANCHES_BY_REGION[storeRegion] ?? [], [storeRegion]);
+  const isStoreManagerRole = role === "store_manager";
+  const isStoreDepartment = department === "Cửa hàng";
+  const isStoreTechnicianRole = role === "store_technician";
+  const isStoreTrainerRole = role === "store_trainer";
+  const storeLeadOptions = useMemo(
+    () => users.filter((user) => user.department === "Cửa hàng" && user.role === "store_lead" && user.verified),
+    [users]
+  );
+
+  useEffect(() => {
+    setStoreBranchIds((prev) => prev.filter((id) => regionBranches.some((branch) => branch.id === id)));
+  }, [regionBranches]);
 
   const maskedEmail = useMemo(() => maskEmail(email), [email]);
   const isCeoRole = role === "ceo";
@@ -184,7 +212,10 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
           name,
           email,
           role,
-          department: effectiveDepartment
+          department: effectiveDepartment,
+          storeRegion: isStoreDepartment && !isStoreTechnicianRole && !isStoreTrainerRole ? storeRegion : undefined,
+          storeBranchIds: isStoreDepartment && !isStoreTechnicianRole && !isStoreTrainerRole ? storeBranchIds : undefined,
+          storeLeadUserId: isStoreDepartment && isStoreTechnicianRole ? storeLeadUserId : undefined
         });
 
     if (!result.ok) {
@@ -244,12 +275,55 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
       return;
     }
 
+    if (registerStep === "form" && isStoreDepartment) {
+      if (isStoreTechnicianRole) {
+        if (!storeLeadUserId) {
+          setError("Vui lòng chọn Cửa hàng trưởng quản lý.");
+          setIsSubmitting(false);
+          return;
+        }
+      } else if (!isStoreTrainerRole) {
+        if (storeBranchIds.length === 0) {
+          setError("Phòng ban Cửa hàng bắt buộc chọn ít nhất 1 chi nhánh.");
+          setIsSubmitting(false);
+          return;
+        }
+        if (!isStoreManagerRole && storeBranchIds.length !== 1) {
+          setError("Vai trò này chỉ được chọn đúng 1 chi nhánh.");
+          setIsSubmitting(false);
+          return;
+        }
+        if (isStoreManagerRole && storeBranchIds.length > 5) {
+          setError("Quản lí cửa hàng chỉ được chọn tối đa 5 chi nhánh.");
+          setIsSubmitting(false);
+          return;
+        }
+      } else {
+        // Trainer does not need region/branch on registration.
+      }
+    }
+
+    if (registerStep === "form" && isStoreTechnicianRole && storeLeadOptions.length === 0) {
+      setError("Chưa có tài khoản Cửa hàng trưởng nào khả dụng để gán quản lý.");
+      setIsSubmitting(false);
+      return;
+    }
+
+    if (registerStep === "form" && isStoreTechnicianRole && storeLeadUserId && !storeLeadOptions.some((item) => item.id === storeLeadUserId)) {
+      setError("Cửa hàng trưởng đã chọn không hợp lệ.");
+        setIsSubmitting(false);
+        return;
+    }
+
     if (registerStep === "form") {
       const result = await requestRegistrationOtp({
         name,
         email,
         role,
-        department: effectiveDepartment
+        department: effectiveDepartment,
+        storeRegion: isStoreDepartment && !isStoreTechnicianRole && !isStoreTrainerRole ? storeRegion : undefined,
+        storeBranchIds: isStoreDepartment && !isStoreTechnicianRole && !isStoreTrainerRole ? storeBranchIds : undefined,
+        storeLeadUserId: isStoreDepartment && isStoreTechnicianRole ? storeLeadUserId : undefined
       });
 
       if (!result.ok) {
@@ -289,6 +363,9 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
       setEmailMode("company");
       setRole("employee");
       setDepartment("IT");
+      setStoreRegion("Hồ Chí Minh");
+      setStoreBranchIds([]);
+      setStoreLeadUserId("");
       setIsSubmitting(false);
       return;
     }
@@ -420,6 +497,79 @@ export function AuthShell({ mode }: { mode: AuthMode }) {
                   ))}
                 </select>
               </label>
+
+              {isStoreDepartment ? (
+                <>
+                  {isStoreTechnicianRole ? (
+                    <label className="grid gap-2">
+                      <span className="text-sm font-medium text-text">Cửa hàng trưởng quản lý</span>
+                      <select
+                        value={storeLeadUserId}
+                        onChange={(event) => setStoreLeadUserId(event.target.value)}
+                        className="rounded-2xl border border-[rgba(55,45,33,0.12)] bg-white/75 px-4 py-3 outline-none transition focus:border-ink"
+                      >
+                        <option value="">Chọn cửa hàng trưởng</option>
+                        {storeLeadOptions.map((lead) => (
+                          <option key={lead.id} value={lead.id}>
+                            {lead.name} ({lead.email})
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : isStoreTrainerRole ? null : (
+                    <>
+                      <label className="grid gap-2">
+                        <span className="text-sm font-medium text-text">Khu vực</span>
+                        <select
+                          value={storeRegion}
+                          onChange={(event) => setStoreRegion(event.target.value as StoreRegion)}
+                          className="rounded-2xl border border-[rgba(55,45,33,0.12)] bg-white/75 px-4 py-3 outline-none transition focus:border-ink"
+                        >
+                          {STORE_REGIONS.map((region) => (
+                            <option key={region} value={region}>
+                              {region}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <div className="grid gap-2">
+                        <span className="text-sm font-medium text-text">
+                          Chi nhánh ({isStoreManagerRole ? "chọn tối đa 5" : "chọn 1"})
+                        </span>
+                        <div className="max-h-56 space-y-2 overflow-y-auto rounded-2xl border border-[rgba(55,45,33,0.12)] bg-white/75 p-3">
+                          {regionBranches.map((branch) => {
+                            const checked = storeBranchIds.includes(branch.id);
+                            const disabled =
+                              !checked &&
+                              ((isStoreManagerRole && storeBranchIds.length >= 5) || (!isStoreManagerRole && storeBranchIds.length >= 1));
+                            return (
+                              <label key={branch.id} className={`flex cursor-pointer items-start gap-2 rounded-xl p-2 ${disabled ? "opacity-50" : ""}`}>
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  disabled={disabled}
+                                  onChange={(event) => {
+                                    setStoreBranchIds((prev) => {
+                                      if (event.target.checked) return [...prev, branch.id];
+                                      return prev.filter((id) => id !== branch.id);
+                                    });
+                                  }}
+                                />
+                                <span className="text-sm text-text">
+                                  <strong>{branch.name}</strong>
+                                  <br />
+                                  {branch.address}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </>
+              ) : null}
             </>
           ) : null}
 

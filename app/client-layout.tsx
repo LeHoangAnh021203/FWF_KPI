@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation"
 import { AuthGuard } from "@/components/auth-guard"
 import DashboardLayout from "@/components/dashboard-layout"
 import { DirectoryProvider } from "@/components/directory-provider"
+import { PermissionAlertProvider } from "@/components/permission-alert-provider"
 import { WorkspaceProvider } from "@/components/workspace-context"
 
 export default function ClientLayout({
@@ -24,6 +25,7 @@ export default function ClientLayout({
         <AuthGuard>
             <DirectoryProvider>
                 <WorkspaceProvider>
+                    <PermissionAlertProvider />
                     <DashboardLayout>{children}</DashboardLayout>
                 </WorkspaceProvider>
             </DirectoryProvider>

@@ -99,6 +99,8 @@ export default function PeoplePage() {
     const [customStartDate, setCustomStartDate] = useState("")
     const [customEndDate, setCustomEndDate] = useState("")
     const isAdmin = isAdminLikeRole(user?.role)
+    const isStoreTrainer = user?.role === "store_trainer" && user?.department === "Cửa hàng"
+    const canManagePeople = isAdmin || isStoreTrainer
     const currentUser = findPersonForAuthUser(user, people)
     const currentTeamId = currentUser?.team ?? ""
     const accessiblePeople = isAdmin
@@ -107,6 +109,22 @@ export default function PeoplePage() {
             ? people.filter((person) => person.team === currentTeamId)
             : []
     const visibleTeams = isAdmin ? teams : teams.filter((team) => team.id === currentTeamId)
+    const trainerManagedRoleSet = useMemo(
+        () => new Set(["Quản lí cửa hàng", "Cửa hàng trưởng", "Kỹ thuật viên", "Nhân viên cửa hàng"]),
+        []
+    )
+    const canTrainerManagePerson = (person: Person) =>
+        isStoreTrainer &&
+        person.team === "store" &&
+        person.id !== currentUser?.id &&
+        trainerManagedRoleSet.has(person.role)
+    const canEditPerson = (person: Person) => isAdmin || canTrainerManagePerson(person)
+    const availablePersonRoles = useMemo(() => {
+        if (isStoreTrainer) {
+            return personDisplayRoles.filter((role) => trainerManagedRoleSet.has(role))
+        }
+        return personDisplayRoles
+    }, [isStoreTrainer, trainerManagedRoleSet])
 
     const filteredPeople = accessiblePeople.filter((person) => {
         const matchesSearch =
@@ -291,7 +309,8 @@ export default function PeoplePage() {
         setEditingPerson(null)
         setPersonForm({
             ...DEFAULT_FORM,
-            team: teams[0]?.id ?? "marketing",
+            team: isStoreTrainer ? "store" : teams[0]?.id ?? "marketing",
+            role: isStoreTrainer ? "Kỹ thuật viên" : DEFAULT_FORM.role,
         })
         setIsDialogOpen(true)
     }
@@ -439,7 +458,7 @@ export default function PeoplePage() {
                                             {person.role}
                                         </Badge>
                                     </div>
-                                    {isAdmin && (
+                                    {canEditPerson(person) && (
                                         <div className="flex items-center gap-1">
                                             <Button
                                                 variant="ghost"
@@ -538,12 +557,14 @@ export default function PeoplePage() {
                             Manage your team members and view their availability
                         </p>
                     </div>
-                    {isAdmin ? (
+                    {canManagePeople ? (
                         <div className="flex items-center gap-2">
-                            <Button variant="outline" onClick={() => setIsHistoryDialogOpen(true)}>
-                                <History className="mr-2 h-4 w-4" />
-                                Lịch sử tài khoản
-                            </Button>
+                            {isAdmin ? (
+                                <Button variant="outline" onClick={() => setIsHistoryDialogOpen(true)}>
+                                    <History className="mr-2 h-4 w-4" />
+                                    Lịch sử tài khoản
+                                </Button>
+                            ) : null}
                             <Button onClick={openCreateDialog}>
                                 <UserPlus className="mr-2 h-4 w-4" />
                                 Thêm nhân sự
@@ -666,7 +687,7 @@ export default function PeoplePage() {
                                         <SelectValue placeholder="Chọn role hiển thị" />
                                     </SelectTrigger>
                                     <SelectContent>
-                                        {personDisplayRoles.map((role) => (
+                                        {availablePersonRoles.map((role) => (
                                             <SelectItem key={role} value={role}>
                                                 {role}
                                             </SelectItem>
@@ -676,12 +697,16 @@ export default function PeoplePage() {
                             </div>
                             <div className="grid gap-2">
                                 <Label>Team</Label>
-                                <Select value={personForm.team} onValueChange={(value) => updatePersonForm("team", value)}>
+                                <Select
+                                    value={personForm.team}
+                                    onValueChange={(value) => updatePersonForm("team", value)}
+                                    disabled={isStoreTrainer}
+                                >
                                     <SelectTrigger>
                                         <SelectValue placeholder="Chọn team" />
                                     </SelectTrigger>
                                     <SelectContent>
-                                        {teams.map((team) => (
+                                        {(isStoreTrainer ? teams.filter((team) => team.id === "store") : teams).map((team) => (
                                             <SelectItem key={team.id} value={team.id}>
                                                 {team.name}
                                             </SelectItem>

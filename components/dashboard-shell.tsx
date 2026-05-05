@@ -55,6 +55,10 @@ const sectionAccess: Record<RoleKey, SectionKey[]> = {
   leader: ["overview", "board", "kpi", "audit"],
   employee: ["overview", "board", "kpi"],
   store_staff: ["overview", "board", "kpi"],
+  store_trainer: ["overview", "board", "kpi", "audit"],
+  store_manager: ["overview", "board", "kpi", "audit"],
+  store_lead: ["overview", "board", "kpi"],
+  store_technician: ["overview", "board", "kpi"],
   admin: ["overview", "board", "kpi", "reports", "audit"]
 };
 
@@ -63,6 +67,10 @@ const roles: { id: RoleKey; label: string }[] = [
   { id: "leader", label: "Leader" },
   { id: "employee", label: "Nhân viên" },
   { id: "store_staff", label: "Nhân viên cửa hàng" },
+  { id: "store_trainer", label: "Trainer" },
+  { id: "store_manager", label: "Quản lí cửa hàng" },
+  { id: "store_lead", label: "Cửa hàng trưởng" },
+  { id: "store_technician", label: "Kỹ thuật viên" },
   { id: "admin", label: "Admin" }
 ];
 
@@ -127,6 +135,50 @@ const roleData: Record<
     metricDept: "Vận hành cửa hàng ổn định",
     metricRisk: "01",
     metricApproval: "02"
+  },
+  store_trainer: {
+    heroTitle: "Trainer theo dõi toàn bộ cụm cửa hàng phụ trách",
+    heroDescription: "Ưu tiên kiểm tra tiến độ đào tạo, chất lượng vận hành và phân bổ coaching theo từng chi nhánh.",
+    heroOnTime: "93%",
+    heroKpi: "87.4",
+    heroPending: "5",
+    metricTasks: "41",
+    metricDept: "Đang kiểm soát tốt",
+    metricRisk: "02",
+    metricApproval: "03"
+  },
+  store_manager: {
+    heroTitle: "Quản lí cửa hàng đang điều phối nhiều chi nhánh",
+    heroDescription: "Tập trung xử lý các đầu việc quá hạn tại từng điểm bán và giữ KPI vận hành đồng đều.",
+    heroOnTime: "90%",
+    heroKpi: "84.1",
+    heroPending: "7",
+    metricTasks: "36",
+    metricDept: "Cần tối ưu phân ca",
+    metricRisk: "03",
+    metricApproval: "02"
+  },
+  store_lead: {
+    heroTitle: "Cửa hàng trưởng kiểm soát vận hành tại chi nhánh",
+    heroDescription: "Bám sát checklist mở/đóng ca và theo dõi tiến độ đội kỹ thuật viên theo ngày.",
+    heroOnTime: "91%",
+    heroKpi: "85.2",
+    heroPending: "4",
+    metricTasks: "24",
+    metricDept: "Ổn định",
+    metricRisk: "02",
+    metricApproval: "01"
+  },
+  store_technician: {
+    heroTitle: "Kỹ thuật viên quản lý task cá nhân theo ca",
+    heroDescription: "Cập nhật tiến độ công việc hàng ngày và xử lý các đầu việc phát sinh đúng SLA.",
+    heroOnTime: "94%",
+    heroKpi: "86.1",
+    heroPending: "3",
+    metricTasks: "16",
+    metricDept: "KPI cá nhân tốt",
+    metricRisk: "01",
+    metricApproval: "01"
   },
   admin: {
     heroTitle: "Hệ thống đang có 4 rule phân quyền cần rà soát",
@@ -498,7 +550,7 @@ export function DashboardShell() {
   const activeRole = roleData[role];
   const department = (user?.department ?? "IT") as Department;
   const availableSections = sections.filter((item) => sectionAccess[role].includes(item.id));
-  const isEmployee = role === "employee" || role === "store_staff";
+  const isEmployee = role === "employee" || role === "store_staff" || role === "store_technician";
 
   const taskSummary = useMemo(() => {
     const total = tasks.length;

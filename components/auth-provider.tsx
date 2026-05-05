@@ -11,6 +11,9 @@ type RegisterInput = {
   email: string;
   role: UserRole;
   department: Department;
+  storeRegion?: string;
+  storeBranchIds?: number[];
+  storeLeadUserId?: string;
 };
 
 type AuthContextValue = {

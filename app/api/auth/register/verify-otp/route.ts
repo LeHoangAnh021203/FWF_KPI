@@ -4,33 +4,40 @@ import { publishAppEventToPersons } from "@/lib/server/realtime";
 import { SESSION_COOKIE_NAME } from "@/lib/server/session";
 
 export async function POST(request: Request) {
-  const body = await request.json();
-  const result = await verifyRegistrationOtp(body.email ?? "", body.otp ?? "");
+  try {
+    const body = await request.json();
+    const result = await verifyRegistrationOtp(body.email ?? "", body.otp ?? "");
 
-  if (!result.ok) {
-    return NextResponse.json(result, { status: 400 });
-  }
-
-  if (!result.user) {
-    if (result.requiresApproval) {
-      const adminRecipients = await getAdminRealtimePersonIds();
-      void publishAppEventToPersons(adminRecipients, {
-        type: "approval.updated",
-        actorId: "system",
-        action: "requested",
-        entityType: "approval",
-        occurredAt: new Date().toISOString()
-      });
+    if (!result.ok) {
+      return NextResponse.json(result, { status: 400 });
     }
 
-    return NextResponse.json(result);
-  }
+    if (!result.user) {
+      if (result.requiresApproval) {
+        const adminRecipients = await getAdminRealtimePersonIds();
+        void publishAppEventToPersons(adminRecipients, {
+          type: "approval.updated",
+          actorId: "system",
+          action: "requested",
+          entityType: "approval",
+          occurredAt: new Date().toISOString()
+        });
+      }
 
-  const response = NextResponse.json({ ok: true, user: { ...result.user, password: "" } });
-  response.cookies.set(SESSION_COOKIE_NAME, result.user.id, {
-    httpOnly: true,
-    sameSite: "lax",
-    path: "/"
-  });
-  return response;
+      return NextResponse.json(result);
+    }
+
+    const response = NextResponse.json({ ok: true, user: { ...result.user, password: "" } });
+    response.cookies.set(SESSION_COOKIE_NAME, result.user.id, {
+      httpOnly: true,
+      sameSite: "lax",
+      path: "/"
+    });
+    return response;
+  } catch (error) {
+    return NextResponse.json(
+      { ok: false, message: error instanceof Error ? error.message : "Xác minh OTP thất bại." },
+      { status: 500 }
+    );
+  }
 }
